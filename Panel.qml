@@ -13,6 +13,9 @@ Panel {
   id: root
   moduleName: "jebin2.virtual-screens"
   ipcTarget: "jebin2.virtual-screens"
+  // A plugin's bar slot is sized by its button (built-ins get this from the bar).
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
 
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
