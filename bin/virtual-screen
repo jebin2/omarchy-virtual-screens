@@ -140,6 +140,16 @@ EOF
 
 # ---- start / stop ---------------------------------------------------------------
 
+# Stop this screen's Sunshine and wait (up to 5 s) until it has exited and
+# freed its ports, instead of sleeping a fixed time.
+stop_sunshine() {
+  local pid i
+  pid=$(<"$RUN/pid")
+  kill "$pid" 2>/dev/null
+  for i in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.1; done
+  kill -9 "$pid" 2>/dev/null
+}
+
 launch_sunshine() {
   sunshine "$CONF" >/dev/null 2>&1 &
   echo $! > "$RUN/pid"
@@ -257,7 +267,7 @@ set_audio() {
   sed -i "s/^stream_audio = .*/stream_audio = $val/" "$CONF"
   # Sunshine reads its config at start: restart it if it is streaming now.
   if running; then
-    kill "$(<"$RUN/pid")"; sleep 2
+    stop_sunshine
     launch_sunshine
     notify "Sound on the $1 — reconnect in Moonlight (tap the PC → Desktop)"
   else
