@@ -33,7 +33,10 @@ Panel {
   property int vsMsgFor: -1
   property string vsMsg: ""
   property bool vsMsgOk: false
-  property string rootMsg: ""
+  property string rootMsg: ""          // last system-change failure, shown with a Report button
+  property string rootLog: ""          // its output, for the report
+  property string rootAction: ""       // "setup" | "wifi" while running
+  property string rootFailedAction: ""
   property bool rootRunning: false
 
   property bool cursorActive: false
@@ -58,7 +61,9 @@ Panel {
     var d = vsData(n)
     return d.on && (d.devices.length === 0 || root.vsPairFormFor === n)
   }
-  function vsIsOpen(n) { return root.vsExpanded === n || vsShowsPairForm(n) || (root.vsMsgFor === n && root.vsMsg !== "") }
+  function vsIsOpen(n) {
+    return root.vsExpanded === n || vsShowsPairForm(n) || (root.vsMsgFor === n && root.vsMsg !== "") || !!vsData(n).error
+  }
 
   function run(args) { Quickshell.execDetached(["bash", root.vsCmd].concat(args)) }
 
@@ -89,16 +94,29 @@ Panel {
   }
 
   // System changes go through pkexec (the shell shows the password prompt).
-  function runRoot(args) {
+  function runRoot(action, args) {
     if (rootProc.running) return
     root.rootRunning = true
+    root.rootAction = action
     root.rootMsg = ""
+    root.rootLog = ""
     var helper = root.info.system ? root.rootHelperInstalled : (root.binDir + "/virtual-screen-root")
     rootProc.command = root.info.system ? ["pkexec", helper].concat(args) : ["pkexec", "bash", helper].concat(args)
     rootProc.running = true
   }
 
   function refresh() { if (!infoProc.running) infoProc.running = true }
+
+  // Opens a pre-filled GitHub issue in the browser; the user reviews it there.
+  function reportRoot() {
+    var title = (root.rootFailedAction === "setup" ? "Setup failed: " : "Wi-Fi change failed: ") + root.rootMsg
+    reportProc.command = ["bash", root.vsCmd, "issue-url", title, root.rootLog]
+    if (!reportProc.running) reportProc.running = true
+  }
+  function reportScreen(n) {
+    reportProc.command = ["bash", root.vsCmd, String(n), "report"]
+    if (!reportProc.running) reportProc.running = true
+  }
 
   function ensureCursorVisible(item) {
     var scrollArea = panel.loadedContent ? panel.loadedContent.scrollArea : null
@@ -165,12 +183,56 @@ Panel {
     stderr: StdioCollector { id: rootErr; waitForEnd: true }
     onExited: function(exitCode) {
       root.rootRunning = false
-      // 126/127: the password prompt was dismissed.
+      var action = root.rootAction
+      root.rootAction = ""
+      // 126/127: the password prompt was dismissed; not a failure.
       if (exitCode !== 0 && exitCode !== 126 && exitCode !== 127) {
-        var err = String(rootErr.text || rootOut.text || "").trim().split("\n")
-        root.rootMsg = err[err.length - 1] || ("exit " + exitCode)
+        var out = (String(rootOut.text || "") + "\n" + String(rootErr.text || "")).trim()
+        var lines = out.split("\n").filter(function(l) { return l.trim() !== "" })
+        root.rootMsg = lines.length ? lines[lines.length - 1] : strings.t("error.exit").arg(exitCode)
+        root.rootLog = "exit code " + exitCode + "\n" + lines.slice(-40).join("\n")
+        root.rootFailedAction = action
       }
       root.refresh()
+    }
+  }
+
+  Process {
+    id: reportProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var url = String(text || "").trim()
+        if (url.indexOf("https://github.com/") === 0) Util.execArgv(["xdg-open", url])
+      }
+    }
+  }
+
+  // Shown under a failure: what went wrong, and a button that opens a
+  // pre-filled GitHub issue.
+  component FailureNote: Column {
+    id: note
+    property string message: ""
+    signal report()
+    visible: message !== ""
+    width: parent ? parent.width : 0
+    spacing: Style.space(6)
+
+    VsText {
+      width: parent.width
+      wrapMode: Text.WordWrap
+      elide: Text.ElideNone
+      color: Commons.Color.accent
+      text: "✗ " + note.message
+    }
+    Button {
+      text: strings.t("error.report")
+      iconText: "󰊤"
+      fontSize: Style.font.caption
+      foreground: root.bar.foreground
+      fontFamily: root.bar.fontFamily
+      bordered: true
+      onClicked: note.report()
     }
   }
 
@@ -277,21 +339,21 @@ Panel {
               text: strings.t("setup.text")
             }
             Button {
-              text: root.rootRunning ? strings.t("setup.running") : strings.t("setup.button")
+              text: root.rootAction === "setup" ? strings.t("setup.running") : strings.t("setup.button")
+              iconText: root.rootAction === "setup" ? "󰑓" : ""
+              iconSpinning: root.rootAction === "setup"
+              enabled: !root.rootRunning
+              opacity: enabled ? 1.0 : 0.6
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
               bordered: true
-              onClicked: if (!root.rootRunning) root.runRoot(["setup"])
+              onClicked: root.runRoot("setup", ["setup"])
             }
-          }
 
-          VsText {
-            visible: root.rootMsg !== ""
-            width: parent.width
-            wrapMode: Text.WordWrap
-            elide: Text.ElideNone
-            color: Commons.Color.accent
-            text: "✗ " + root.rootMsg
+            FailureNote {
+              message: root.rootFailedAction === "setup" ? root.rootMsg : ""
+              onReport: root.reportRoot()
+            }
           }
 
           // ---------- Wi-Fi ----------
@@ -334,14 +396,24 @@ Panel {
                 id: wifiButton
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.info.wifi && root.info.wifi.trusted ? strings.t("wifi.disallow") : strings.t("wifi.allow")
+                text: root.rootAction === "wifi" ? strings.t("wifi.working")
+                  : root.info.wifi && root.info.wifi.trusted ? strings.t("wifi.disallow") : strings.t("wifi.allow")
+                iconText: root.rootAction === "wifi" ? "󰑓" : ""
+                iconSpinning: root.rootAction === "wifi"
+                enabled: !root.rootRunning
+                opacity: enabled ? 1.0 : 0.6
                 fontSize: Style.font.caption
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
                 bordered: true
                 active: root.info.wifi && root.info.wifi.trusted
-                onClicked: if (root.info.wifi) root.runRoot([root.info.wifi.trusted ? "untrust-wifi" : "trust-wifi", root.info.wifi.uuid])
+                onClicked: if (root.info.wifi) root.runRoot("wifi", [root.info.wifi.trusted ? "untrust-wifi" : "trust-wifi", root.info.wifi.uuid])
               }
+            }
+
+            FailureNote {
+              message: root.rootFailedAction === "wifi" ? root.rootMsg : ""
+              onReport: root.reportRoot()
             }
           }
 
@@ -514,8 +586,13 @@ Panel {
         anchors.margins: Style.space(10)
         spacing: Style.space(8)
 
+        FailureNote {
+          message: block.sd.error || ""
+          onReport: root.reportScreen(block.screenNumber)
+        }
+
         VsText {
-          visible: !block.sd.on
+          visible: !block.sd.on && !block.sd.error
           width: parent.width
           color: block.dim
           text: strings.t("details.off")

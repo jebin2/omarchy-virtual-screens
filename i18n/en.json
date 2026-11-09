@@ -2,7 +2,10 @@
   "title": "Virtual screens",
   "subtitle.setup": "Needs a one-time setup",
   "subtitle.off": "All off",
-  "subtitle.on": { "one": "%1 screen on", "other": "%1 screens on" },
+  "subtitle.on": {
+    "one": "%1 screen on",
+    "other": "%1 screens on"
+  },
   "header.screens": "SCREENS",
   "header.wifi": "WI-FI",
   "setup.text": "Installs Sunshine and lets devices reach this laptop over USB tethering. Wi-Fi stays closed until you allow a network. Asks for your password once.",
@@ -34,5 +37,8 @@
   "details.or": "%1 or %2",
   "details.sound": "Sound",
   "details.laptop": "Laptop",
-  "details.device": "Device"
+  "details.device": "Device",
+  "wifi.working": "Applying…",
+  "error.report": "Report on GitHub",
+  "error.exit": "Failed (exit %1)"
 }
