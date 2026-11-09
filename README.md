@@ -110,6 +110,14 @@ Sunshine itself stays installed (`omarchy pkg drop sunshine` removes it).
 - **Logs:** `~/.config/virtual-screens/screen-N/sunshine.log`.
 - **Anything else:** use **Report on GitHub** in the panel, or [open an issue](https://github.com/jebin2/omarchy-virtual-screens/issues).
 
+## Credits
+
+- [Sunshine](https://github.com/LizardByte/Sunshine) by LizardByte (GPL-3.0): the streaming host this plugin drives.
+- [Moonlight](https://moonlight-stream.org) (GPL-3.0): the client on each device.
+- [Hyprland](https://hypr.land) headless outputs make the virtual screens possible.
+- [Omarchy](https://omarchy.org) and its shell plugin system.
+- Built with [Claude Code](https://claude.com/claude-code).
+
 ## License
 
 MIT
