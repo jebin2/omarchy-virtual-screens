@@ -5,7 +5,8 @@
 # Trusted networks: NetworkManager connection UUIDs in
 # /etc/omarchy-virtual-screens/trusted-wifi, managed from the panel.
 TRUSTED=/etc/omarchy-virtual-screens/trusted-wifi
-BASES="48089 48189 48289"                          # screens 2, 3, 4
+BASES=$(cat /etc/omarchy-virtual-screens/bases 2>/dev/null)  # screens 2, 3, 4 (written by setup)
+[[ $BASES =~ ^[0-9\ ]+$ ]] || BASES="48089 48189 48289"
 STATE=/var/lib/omarchy-virtual-screens/wifi-rules  # rules added; survives reboots
 FLAG=/run/omarchy-virtual-screens/wifi-open        # exists while open (read by the panel)
 

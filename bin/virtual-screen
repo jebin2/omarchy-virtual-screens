@@ -9,6 +9,7 @@
 #   virtual-screen [N] audio laptop|device          where that screen's sound plays
 #   virtual-screen info-all                         JSON for the bar panel
 #   virtual-screen status-all                       "N on|off" for every screen
+#   virtual-screen uninstall                        remove everything (asks for the password)
 #   virtual-screen [N] fit                          (Sunshine calls this) resize SCREEN-N
 #                                                   to the connecting device
 #   virtual-screen [N] report                       URL of a pre-filled GitHub issue for
@@ -29,11 +30,17 @@ set -uo pipefail
 
 SCREENS=(2 3 4)
 REPO=jebin2/omarchy-virtual-screens
+PLUGIN_ID=jebin2.virtual-screens
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+BIN_DIR="$(dirname "$SELF")"
 CONF_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/virtual-screens"
 LOGIN_FILE="$CONF_ROOT/login"
+RUN_ROOT="${XDG_RUNTIME_DIR:-/tmp}/virtual-screens"
 SYS_DIR=/etc/omarchy-virtual-screens
+LIBEXEC=/usr/local/libexec/omarchy-virtual-screens-root
 WIFI_FLAG=/run/omarchy-virtual-screens/wifi-open
+# The system part this version expects; must match VERSION in virtual-screen-root.
+SYSTEM_VERSION=2
 
 ordinal() { case $1 in 2) echo Second ;; 3) echo Third ;; 4) echo Fourth ;; *) echo "Screen $1" ;; esac; }
 
@@ -44,12 +51,12 @@ setup() {
   CONF="$CONF_DIR/sunshine.conf"
   BASE=$((47989 + (N - 1) * 100))
   API="https://127.0.0.1:$((BASE + 1))"
-  RUN="${XDG_RUNTIME_DIR:-/tmp}/virtual-screens/$N"
+  RUN="$RUN_ROOT/$N"
   TITLE="$(ordinal "$N") screen"
   mkdir -p "$RUN"
 }
 
-notify() { notify-send -a "Virtual screens" "$TITLE" "$1" 2>/dev/null; echo "$1"; }
+notify() { notify-send -a "Virtual screens" "${TITLE:-Virtual screens}" "$1" 2>/dev/null; echo "$1"; }
 
 # A failure the panel shows with a "Report on GitHub" button.
 fail() {
@@ -57,13 +64,28 @@ fail() {
   { echo "$1"; echo "--- last lines of $CONF_DIR/sunshine.log"; tail -n 25 "$CONF_DIR/sunshine.log" 2>/dev/null; } > "$RUN/error.log"
   notify "$1 — open the Virtual Screens panel to report it"
 }
-running() { [[ -f $RUN/pid ]] && kill -0 "$(<"$RUN/pid")" 2>/dev/null; }
+
+# Our Sunshine is running: the saved pid is alive AND is still Sunshine (pids get reused).
+running() {
+  local pid
+  [[ -f $RUN/pid ]] || return 1
+  pid=$(<"$RUN/pid")
+  [[ $pid =~ ^[0-9]+$ ]] && [[ $(cat "/proc/$pid/comm" 2>/dev/null) == sunshine* ]]
+}
 have_output() { hyprctl monitors all -j | jq -e --arg n "$NAME" 'any(.[]; .name == $n)' >/dev/null; }
 
 make_output() {
   have_output || hyprctl output create headless "$NAME" >/dev/null
   sleep 0.5
 }
+
+# Start/stop/audio for one screen run one at a time, holding $RUN/lock. While
+# it is held the panel shows the screen as busy and keeps its row locked.
+lock_screen() {
+  exec 9>>"$RUN/lock"
+  flock 9
+}
+is_busy() { ! flock -n "$RUN/lock" true 2>/dev/null; }
 
 # ---- login --------------------------------------------------------------------
 
@@ -76,13 +98,16 @@ ensure_login() {
   read -r USER_NAME USER_PASS < "$LOGIN_FILE"
 }
 
+# The login goes to curl on stdin (-K -), so it never shows up in `ps`.
+curl_api() { printf 'user = "%s:%s"\n' "$USER_NAME" "$USER_PASS" | curl -K - -sk "$@"; }
+
 api() {  # api METHOD PATH [JSON]
-  local args=(-sk --max-time 15 -u "$USER_NAME:$USER_PASS" -X "$1" "$API$2")
+  local args=(--max-time 15 -X "$1" "$API$2")
   [[ -n ${3:-} ]] && args+=(-H 'Content-Type: application/json' -d "$3")
-  curl "${args[@]}"
+  curl_api "${args[@]}"
 }
 
-login_ok() { [[ $(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' -u "$USER_NAME:$USER_PASS" "$API/api/clients/list") == 200 ]]; }
+login_ok() { [[ $(curl_api --max-time 5 -o /dev/null -w '%{http_code}' "$API/api/clients/list") == 200 ]]; }
 
 # ---- config -------------------------------------------------------------------
 
@@ -132,6 +157,7 @@ EOF
   mv "$CONF.new" "$CONF"
   [[ -f $CONF_DIR/apps.json ]] || echo '{"env":{},"apps":[{"name":"Desktop","image-path":"desktop.png"}]}' > "$CONF_DIR/apps.json"
   # Set the login on this instance whenever the saved one is new to it.
+  # (Sunshine only takes it as arguments; this runs for a moment, once per new login.)
   local mark; mark=$(sha256sum "$LOGIN_FILE" | cut -c1-16)
   if [[ $(cat "$CONF_DIR/.login-set" 2>/dev/null) != "$mark" ]]; then
     sunshine "$CONF" --creds "$USER_NAME" "$USER_PASS" >/dev/null 2>&1 && echo "$mark" > "$CONF_DIR/.login-set"
@@ -144,6 +170,7 @@ EOF
 # freed its ports, instead of sleeping a fixed time.
 stop_sunshine() {
   local pid i
+  running || return 0
   pid=$(<"$RUN/pid")
   kill "$pid" 2>/dev/null
   for i in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.1; done
@@ -151,8 +178,15 @@ stop_sunshine() {
 }
 
 launch_sunshine() {
-  sunshine "$CONF" >/dev/null 2>&1 &
+  sunshine "$CONF" >/dev/null 2>&1 9>&- &   # 9>&-: Sunshine must not hold the screen lock
   echo $! > "$RUN/pid"
+}
+
+# Wait up to 10 s for Sunshine to answer with our login.
+wait_login() {
+  local i
+  for i in $(seq 1 20); do running || return 1; login_ok && return 0; sleep 0.5; done
+  return 1
 }
 
 # Addresses a device can use: USB tethering links, plus Wi-Fi while the trusted
@@ -160,6 +194,7 @@ launch_sunshine() {
 addresses() {
   local ifc addr
   while read -r ifc _ addr _; do
+    [[ $addr =~ ^[0-9.]+/ ]] || continue
     case $ifc in
       tether*) echo "USB ${addr%/*}" ;;
       wl*) [[ -e $WIFI_FLAG ]] && echo "Wi-Fi ${addr%/*}" ;;
@@ -174,14 +209,14 @@ start() {
   write_config
   make_output
   launch_sunshine
-  local i
-  for i in $(seq 1 20); do running || break; login_ok && break; sleep 0.5; done
-  if ! running; then
-    fail "Sunshine failed to start"; stop >/dev/null; return 1
-  fi
-  if ! login_ok; then  # login out of step (state file replaced): set it again
-    stop_sunshine
-    rm -f "$CONF_DIR/.login-set"; write_config; launch_sunshine
+  if ! wait_login; then
+    if running; then  # login out of step (state file replaced): set it again
+      stop_sunshine
+      rm -f "$CONF_DIR/.login-set"; write_config; launch_sunshine
+      wait_login || { fail "Sunshine started but didn't accept the login"; stop quiet; return 1; }
+    else
+      fail "Sunshine failed to start"; stop quiet; return 1
+    fi
   fi
   local where
   where=$(addresses | awk -v p=":$BASE" '{printf "%s%s %s%s", (NR>1?", ":""), $1, $2, p}')
@@ -189,18 +224,34 @@ start() {
 }
 
 stop() {
-  running && stop_sunshine
+  stop_sunshine
   rm -f "$RUN/pid"
   have_output && hyprctl output remove "$NAME" >/dev/null
-  notify "Off"
+  [[ ${1:-} == quiet ]] || notify "Off"
+}
+
+# Hyprland only takes a scale that divides the resolution into whole pixels.
+# Pick the largest such scale up to the one we want.
+pick_scale() {
+  local w=$1 h=$2 want=$3
+  awk -v w="$w" -v h="$h" -v want="$want" 'BEGIN {
+    n = split("2 1.875 1.75 1.6 1.5 1.25 1.2 1", s, " ")
+    for (i = 1; i <= n; i++) {
+      if (s[i] > want) continue
+      x = w / s[i]; y = h / s[i]
+      if (x == int(x) && y == int(y)) { print s[i]; exit }
+    }
+    print 1
+  }'
 }
 
 # Sunshine runs this before a stream starts, with the device's requested size.
 fit() {
-  local w=${SUNSHINE_CLIENT_WIDTH:-} h=${SUNSHINE_CLIENT_HEIGHT:-} fps=${SUNSHINE_CLIENT_FPS:-60} scale=1
+  local w=${SUNSHINE_CLIENT_WIDTH:-} h=${SUNSHINE_CLIENT_HEIGHT:-} fps=${SUNSHINE_CLIENT_FPS:-60} want=1 scale
   [[ $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ && $fps =~ ^[0-9]+$ ]] || exit 0
-  # Roughly "same text size as a laptop": Hyprland snaps it to a clean scale.
-  if (( w >= 2400 )); then scale=2; elif (( w >= 1900 )); then scale=1.5; fi
+  # Roughly "same text size as a laptop".
+  if (( w >= 2400 )); then want=2; elif (( w >= 1900 )); then want=1.5; fi
+  scale=$(pick_scale "$w" "$h" "$want")
   hyprctl eval "hl.monitor({ output = \"$NAME\", mode = \"${w}x${h}@${fps}\", position = \"auto-right\", scale = $scale })" >/dev/null 2>&1
   sleep 0.5
   exit 0
@@ -208,6 +259,7 @@ fit() {
 
 # ---- devices --------------------------------------------------------------------
 
+status_ok() { jq -e '.status == true or .status == "true"' <<<"$1" >/dev/null 2>&1; }
 client_uuids() { api GET /api/clients/list | jq -r '.named_certs[]?.uuid' | sort; }
 
 # Success is a NEW client in Sunshine's list, not just an accepted PIN:
@@ -215,8 +267,9 @@ client_uuids() { api GET /api/clients/list | jq -r '.named_certs[]?.uuid' | sort
 pair() {
   local pin=${1:-} name=${2:-}
   [[ $pin =~ ^[0-9]{4}$ ]] || { echo "The PIN is the 4 digits Moonlight shows"; return 2; }
-  [[ -n $name ]] || name="$(ordinal "$N") screen device"
   name=$(printf '%s' "$name" | tr -cd '[:alnum:] ._-' | head -c 32)
+  name="${name#"${name%%[! ]*}"}"
+  [[ -n ${name// /} ]] || name="$(ordinal "$N") screen device"
   running || { echo "Turn the screen on first"; return 2; }
   ensure_login
   local before ids="" accepted=false body resp i id
@@ -230,13 +283,14 @@ pair() {
     for id in $(tac <<<"$ids"); do  # newest first; only the right one takes the PIN
       body=$(jq -nc --arg id "$id" --arg pin "$pin" --arg name "$name" '{pairing_id:$id, pin:$pin, name:$name}')
       resp=$(api POST /api/pin "$body")
-      [[ $resp == *'"status":true'* ]] && { accepted=true; break; }
+      status_ok "$resp" && { accepted=true; break; }
     done
-  else  # older Sunshine API without pairing ids
+    $accepted || { echo "Sunshine didn't take that PIN. Check the 4 digits in Moonlight and try again."; return 1; }
+  else  # older Sunshine API without pairing ids, or Moonlight isn't asking
     resp=$(api POST /api/pin "$(jq -nc --arg pin "$pin" --arg name "$name" '{pin:$pin, name:$name}')")
-    [[ $resp == *'"status":true'* ]] && accepted=true
+    status_ok "$resp" && accepted=true
+    $accepted || { echo "Moonlight isn't waiting for a PIN. In Moonlight tap this PC, then type the PIN it shows."; return 1; }
   fi
-  $accepted || { echo "Wrong PIN, or Moonlight isn't waiting. In Moonlight tap this PC, then type the PIN it shows."; return 1; }
   for i in $(seq 1 15); do
     [[ -n $(comm -13 <(echo "$before") <(client_uuids)) ]] && { echo "Paired: $name"; return 0; }
     sleep 1
@@ -245,13 +299,15 @@ pair() {
 }
 
 forget() {
-  local uuid=${1:-} st="$CONF_DIR/sunshine_state.json"
+  local uuid=${1:-} st="$CONF_DIR/sunshine_state.json" resp
   [[ $uuid =~ ^[A-Za-z0-9-]+$ ]] || { echo "usage: virtual-screen $N forget UUID"; return 2; }
   if running; then
     ensure_login
-    api POST /api/clients/unpair "$(jq -nc --arg u "$uuid" '{uuid:$u}')" >/dev/null
+    resp=$(api POST /api/clients/unpair "$(jq -nc --arg u "$uuid" '{uuid:$u}')")
+    status_ok "$resp" || { echo "Sunshine didn't forget the device. Try again."; return 1; }
   elif [[ -f $st ]]; then
-    jq --arg u "$uuid" '.root.named_devices |= map(select(.uuid != $u))' "$st" > "$st.new" && mv "$st.new" "$st"
+    jq --arg u "$uuid" '.root.named_devices |= map(select(.uuid != $u))' "$st" > "$st.new" && mv "$st.new" "$st" ||
+      { rm -f "$st.new"; echo "Couldn't edit $st"; return 1; }
   fi
   echo "Forgot the device"
 }
@@ -269,7 +325,11 @@ set_audio() {
   if running; then
     stop_sunshine
     launch_sunshine
-    notify "Sound on the $1 — reconnect in Moonlight (tap the PC → Desktop)"
+    if wait_login; then
+      notify "Sound on the $1 — reconnect in Moonlight (tap the PC → Desktop)"
+    else
+      fail "Sunshine didn't come back after the sound change"; stop quiet; return 1
+    fi
   else
     notify "Sound on the $1"
   fi
@@ -278,18 +338,23 @@ set_audio() {
 # ---- reporting ------------------------------------------------------------------
 
 # A pre-filled "new issue" URL. It opens in the browser, so the user reads and
-# edits it before anything is sent.
+# edits it before anything is sent. GitHub refuses URLs much over 8 KB, so the
+# details are cut until it fits.
 issue_url() {
-  local title=$1 details=$2 plugin omarchy sunshine fence='```' body
-  plugin=$(jq -r .version "$(dirname "$SELF")/../manifest.json" 2>/dev/null)
+  local title=$1 details=$2 plugin omarchy sunshine fence='```' body url snip keep=3000
+  plugin=$(jq -r .version "$BIN_DIR/../manifest.json" 2>/dev/null)
   omarchy=$(omarchy version 2>/dev/null | head -n 1)
   sunshine=$(pacman -Q sunshine 2>/dev/null | cut -d' ' -f2)
-  body="## What happened
+  title=${title:0:200}
+  while :; do
+    # Keep the end of the details: the last log lines matter most.
+    if (( ${#details} > keep )); then snip="…${details: -keep}"; else snip=$details; fi
+    body="## What happened
 $title
 
 ## Details
 $fence
-${details:0:3000}
+$snip
 $fence
 
 ## System
@@ -300,8 +365,12 @@ $fence
 - Encoder: $(encoder_lines | tr '\n' ' ')
 
 <!-- Please check the details above for anything private before submitting. -->"
-  printf 'https://github.com/%s/issues/new?title=%s&body=%s\n' "$REPO" \
-    "$(printf '%s' "$title" | jq -sRr @uri)" "$(printf '%s' "$body" | jq -sRr @uri)"
+    url=$(printf 'https://github.com/%s/issues/new?title=%s&body=%s' "$REPO" \
+      "$(printf '%s' "$title" | jq -sRr @uri)" "$(printf '%s' "$body" | jq -sRr @uri)")
+    (( ${#url} <= 7000 || keep <= 200 )) && break
+    keep=$((keep * 2 / 3))
+  done
+  echo "$url"
 }
 
 report() {
@@ -311,37 +380,66 @@ report() {
   issue_url "$title" "$details"
 }
 
+# ---- uninstall ------------------------------------------------------------------
+
+# Everything in one go: screens off, the system part (password), this user's
+# configs and pairings, then the plugin itself.
+uninstall() {
+  local s helper rc
+  TITLE="Virtual screens"
+  for s in "${SCREENS[@]}"; do setup "$s"; stop quiet; done
+  if [[ -e $SYS_DIR || -e $LIBEXEC ]]; then
+    if [[ -x $LIBEXEC ]]; then helper=("$LIBEXEC"); else helper=(bash "$BIN_DIR/virtual-screen-root"); fi
+    pkexec "${helper[@]}" uninstall; rc=$?
+    if (( rc == 126 )); then notify "Uninstall cancelled"; return 1; fi
+    if (( rc != 0 )); then notify "Uninstall failed (exit $rc): firewall and USB pieces are still there"; return 1; fi
+  fi
+  rm -rf "$CONF_ROOT" "$RUN_ROOT"
+  if [[ -d ${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/$PLUGIN_ID ]]; then
+    omarchy plugin remove "$PLUGIN_ID" --yes >/dev/null || { notify "Couldn't remove the plugin: run omarchy plugin remove $PLUGIN_ID"; return 1; }
+  fi
+  notify "Removed. Sunshine itself is still installed (omarchy pkg drop sunshine removes it)."
+}
+
 # ---- panel ----------------------------------------------------------------------
 
 info() {
-  local on=false audio=laptop devices error=""
+  local on=false busy=false audio=laptop devices error=""
   running && on=true
+  is_busy && busy=true
   [[ -f $RUN/error ]] && error=$(head -n 1 "$RUN/error")
   grep -q '^stream_audio = enabled' "$CONF" 2>/dev/null && audio=device
   devices=$(jq -c '[.root.named_devices[]? | {name, uuid}]' "$CONF_DIR/sunshine_state.json" 2>/dev/null) || devices='[]'
   [[ -n $devices ]] || devices='[]'
-  jq -nc --argjson n "$N" --arg title "$TITLE" --argjson on "$on" --arg audio "$audio" \
-     --arg port "$BASE" --argjson devices "$devices" --arg error "$error" \
-     --argjson addrs "$(addresses | jq -Rnc '[inputs | split(" ") | {kind: .[0], addr: .[1]}]')" \
-     '{n: $n, title: $title, on: $on, audio: $audio, port: ($port | tonumber), error: $error,
+  jq -nc --argjson n "$N" --arg title "$TITLE" --argjson on "$on" --argjson busy "$busy" --arg audio "$audio" \
+     --arg port "$BASE" --argjson devices "$devices" --arg error "$error" --argjson addrs "$ADDRS" \
+     '{n: $n, title: $title, on: $on, busy: $busy, audio: $audio, port: ($port | tonumber), error: $error,
        addresses: [$addrs[] | .addr += (":" + $port)], devices: $devices}'
 }
 
 # Everything the panel shows, in one call.
 info_all() {
-  local screens wifi_name="" wifi_uuid="" trusted=false sunshine=false system=false
+  local screens wifi_uuid="" wifi_name="" trusted=false sunshine=false system=false update=false ver=""
+  ADDRS=$(addresses | jq -Rnc '[inputs | split(" ") | {kind: .[0], addr: .[1]}]')
   screens=$(for s in "${SCREENS[@]}"; do setup "$s"; info; done | jq -sc .)
   command -v sunshine >/dev/null && sunshine=true
-  [[ -f $SYS_DIR/version ]] && system=true
-  IFS=: read -r wifi_name wifi_uuid < <(nmcli -t -f NAME,UUID,TYPE con show --active 2>/dev/null \
-    | awk -F: '$3 == "802-11-wireless" {print $1 ":" $2; exit}')
-  [[ -n $wifi_uuid ]] && grep -qx "$wifi_uuid" "$SYS_DIR/trusted-wifi" 2>/dev/null && trusted=true
+  if [[ -f $SYS_DIR/version ]]; then
+    system=true
+    ver=$(<"$SYS_DIR/version")
+    [[ $ver == "$SYSTEM_VERSION" ]] || update=true
+  fi
+  # -g escapes ":" inside fields, so ask for the name separately, unescaped.
+  wifi_uuid=$(nmcli -g UUID,TYPE con show --active 2>/dev/null | awk -F: '$NF == "802-11-wireless" {print $1; exit}')
+  if [[ -n $wifi_uuid ]]; then
+    wifi_name=$(nmcli -e no -g connection.id con show uuid "$wifi_uuid" 2>/dev/null)
+    grep -qx "$wifi_uuid" "$SYS_DIR/trusted-wifi" 2>/dev/null && trusted=true
+  fi
   jq -nc --argjson screens "$screens" --argjson sunshine "$sunshine" --argjson system "$system" \
+     --argjson update "$update" \
      --arg wname "$wifi_name" --arg wuuid "$wifi_uuid" --argjson trusted "$trusted" \
      --argjson open "$([[ -e $WIFI_FLAG ]] && echo true || echo false)" \
-     --arg root "$(dirname "$SELF")/virtual-screen-root" \
-     '{screens: $screens, ready: ($sunshine and $system), sunshine: $sunshine, system: $system,
-       rootHelper: $root,
+     '{loaded: true, screens: $screens, ready: ($sunshine and $system), sunshine: $sunshine, system: $system,
+       update: $update,
        wifi: (if $wuuid == "" then null else {name: $wname, uuid: $wuuid, trusted: $trusted, open: $open} end)}'
 }
 
@@ -353,6 +451,7 @@ case ${1:-} in
     exit 0 ;;
   info-all) info_all; exit 0 ;;
   issue-url) issue_url "${2:-Virtual Screens problem}" "${3:-}"; exit 0 ;;
+  uninstall) uninstall; exit ;;
 esac
 
 n=2
@@ -361,15 +460,15 @@ if [[ ${1:-} =~ ^[0-9]+$ ]]; then n=$1; shift; fi
 setup "$n"
 
 case "${1:-toggle}" in
-  start) running && notify "Already on" || start ;;
-  stop) stop ;;
-  toggle) if running; then stop; else start; fi ;;
+  start) lock_screen; running && notify "Already on" || start ;;
+  stop) lock_screen; stop ;;
+  toggle) lock_screen; if running; then stop; else start; fi ;;
   status) running && echo on || echo off ;;
   pair) pair "${2:-}" "${3:-}" ;;
   forget) forget "${2:-}" ;;
-  audio) set_audio "${2:-}" ;;
+  audio) lock_screen; set_audio "${2:-}" ;;
   fit) fit ;;
   report) report ;;
-  info) info ;;
-  *) echo "usage: virtual-screen [2|3|4] [start|stop|toggle|status|pair PIN [NAME]|forget UUID|audio laptop|device] | info-all | status-all"; exit 1 ;;
+  info) ADDRS=$(addresses | jq -Rnc '[inputs | split(" ") | {kind: .[0], addr: .[1]}]'); info ;;
+  *) echo "usage: virtual-screen [2|3|4] [start|stop|toggle|status|pair PIN [NAME]|forget UUID|audio laptop|device] | info-all | status-all | uninstall"; exit 1 ;;
 esac

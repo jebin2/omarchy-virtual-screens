@@ -34,6 +34,8 @@ The virtual screen resizes itself to the device's resolution when it connects. N
 | **Sound: Laptop / Device** | Where that screen's sound plays. Switching restarts the stream, so reconnect in Moonlight. |
 | **Wi-Fi: Allow / Stop allowing** | Let devices on this Wi-Fi connect. Remembered per network. |
 | **Report on GitHub** | Shown when something fails. Opens a pre-filled issue in your browser for you to review and send. |
+| **Update** | Shown after a plugin update that changes the system part. One password prompt. |
+| **Uninstall…** | Removes everything, see below. |
 
 ## How it works
 
@@ -41,7 +43,7 @@ The virtual screen resizes itself to the device's resolution when it connects. N
 |---|---|
 | `bin/virtual-screen` | Runs as you. Creates the virtual monitor `SCREEN-N`, writes its Sunshine config, starts and stops Sunshine, pairs devices through Sunshine's local API, and resizes the screen when a device connects. |
 | `bin/virtual-screen-root` | Runs as root, only from **Set up** and the Wi-Fi buttons, through `pkexec`. Installs the system pieces below. Setup copies it to `/usr/local/libexec/omarchy-virtual-screens-root` (root-owned), and later prompts use that copy. |
-| `system/70-omarchy-virtual-screens.rules` | Names Android USB tethering links `tether0`, `tether1`… so the firewall can allow exactly those. |
+| `system/70-omarchy-virtual-screens.rules` | Names Android USB tethering links (RNDIS) `tether0`, `tether1`… so the firewall can allow exactly those. |
 | `system/90-omarchy-virtual-screens` | NetworkManager script: opens Sunshine's ports on Wi-Fi only while you're on an allowed network, only for its own subnet, and closes them everywhere else. |
 | NetworkManager profile "Virtual screens USB" | USB tethering links never become your internet connection or DNS. |
 
@@ -72,10 +74,18 @@ A random login for Sunshine's API is generated once and kept in `~/.config/virtu
 
 ## Uninstall
 
+In the panel, press **Uninstall…** and confirm. Or in a terminal:
+
 ```bash
-pkexec /usr/local/libexec/omarchy-virtual-screens-root uninstall   # firewall, USB and Wi-Fi pieces
-omarchy plugin remove jebin2.virtual-screens
-rm -rf ~/.config/virtual-screens                                     # configs, pairings, login
+bash ~/.config/omarchy/plugins/jebin2.virtual-screens/bin/virtual-screen uninstall
+```
+
+Either way it asks for your password once, then turns off all screens and removes the firewall rules, USB naming, Wi-Fi script, NetworkManager profile, your configs, pairings and login, and the plugin itself.
+
+If you already ran `omarchy plugin remove jebin2.virtual-screens` (which only deletes the plugin folder), clean up the rest with:
+
+```bash
+pkexec /usr/local/libexec/omarchy-virtual-screens-root uninstall
 ```
 
 Sunshine itself stays installed (`omarchy pkg drop sunshine` removes it).
@@ -84,7 +94,9 @@ Sunshine itself stays installed (`omarchy pkg drop sunshine` removes it).
 
 - **The icon is missing or misplaced after an update:** run `omarchy restart shell`.
 - **Moonlight can't find the PC:** add it by the address the panel shows, including the `:port`.
-- **"Wrong PIN, or Moonlight isn't waiting":** in Moonlight tap the PC first, then type the PIN it shows within a minute.
+- **No USB address although tethering is on:** turn tethering off and on once (a phone that was already plugged in during setup keeps its old link name until it reconnects).
+- **A phone that tethers with NCM (some newer Pixels) gets no USB address:** NCM is left out on purpose, because USB-C docks use the same driver for their Ethernet. Use Wi-Fi, or add `cdc_ncm` to the rule in `/etc/udev/rules.d/70-omarchy-virtual-screens.rules` if you never use such a dock.
+- **"Moonlight isn't waiting for a PIN":** in Moonlight tap the PC first, then type the PIN it shows within a minute.
 - **Logs:** `~/.config/virtual-screens/screen-N/sunshine.log`.
 - **Anything else:** use **Report on GitHub** in the panel, or [open an issue](https://github.com/jebin2/omarchy-virtual-screens/issues).
 

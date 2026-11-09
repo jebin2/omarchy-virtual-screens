@@ -4,11 +4,14 @@
 #   virtual-screen-root setup              install Sunshine, USB naming, firewall, Wi-Fi rules
 #   virtual-screen-root trust-wifi UUID    allow virtual screens on this Wi-Fi connection
 #   virtual-screen-root untrust-wifi UUID  stop allowing them there
-#   virtual-screen-root uninstall          remove everything setup added
+#   virtual-screen-root uninstall          remove everything setup added, and the
+#                                          calling user's configs and pairings
 #
 # setup copies this script to /usr/local/libexec/omarchy-virtual-screens-root
-# (root-owned). The panel calls that copy afterwards, so later password prompts
-# never run a file a user process could have changed.
+# (root-owned). The panel calls that copy for trust/untrust/uninstall, so those
+# password prompts never run a file a user process could have changed. setup
+# itself (first install and updates) runs from the plugin folder, because it
+# needs the plugin's system/ files.
 set -euo pipefail
 
 [[ $EUID == 0 ]] || { echo "run as root (the panel uses pkexec)" >&2; exit 1; }
@@ -19,8 +22,10 @@ LIBEXEC=/usr/local/libexec/omarchy-virtual-screens-root
 DISPATCHER=/etc/NetworkManager/dispatcher.d/90-omarchy-virtual-screens
 UDEV_RULE=/etc/udev/rules.d/70-omarchy-virtual-screens.rules
 NM_PROFILE="Virtual screens USB"
-BASES="48089 48189 48289"   # screens 2, 3, 4 (see virtual-screen)
-VERSION=1
+# Base port of screens 2, 3, 4 (47989 + 100*(N-1), see virtual-screen). Written
+# to $SYS_DIR/bases for the Wi-Fi dispatcher.
+BASES="48089 48189 48289"
+VERSION=2   # bump with SYSTEM_VERSION in virtual-screen when setup changes
 
 # Sunshine's ports for one screen: "PORT/PROTO" per line.
 ports() {
@@ -41,12 +46,29 @@ apply_wifi() {
   CONNECTION_UUID=$uuid "$DISPATCHER" "$dev" up
 }
 
+usb_rules() {  # usb_rules allow|delete
+  local b p
+  for b in $BASES; do
+    for p in $(ports "$b"); do
+      if [[ $1 == allow ]]; then
+        ufw allow in on 'tether+' to any port "${p%/*}" proto "${p#*/}" comment omarchy-virtual-screens >/dev/null
+      else
+        ufw --force delete allow in on 'tether+' to any port "${p%/*}" proto "${p#*/}" >/dev/null 2>&1 || true
+      fi
+    done
+  done
+}
+
 setup() {
+  [[ -f $HERE/../system/90-omarchy-virtual-screens ]] ||
+    { echo "setup must run from the plugin folder (bin/virtual-screen-root)" >&2; exit 2; }
+
   # Sunshine (Omarchy's package repo carries it).
   command -v sunshine >/dev/null || pacman -S --needed --noconfirm sunshine
 
   install -d -m 755 "$SYS_DIR" /usr/local/libexec
   [[ -f $SYS_DIR/trusted-wifi ]] || install -m 644 /dev/null "$SYS_DIR/trusted-wifi"
+  echo "$BASES" > "$SYS_DIR/bases"
   install -o root -g root -m 755 "$HERE/virtual-screen-root" "$LIBEXEC"
   install -o root -g root -m 755 "$HERE/../system/90-omarchy-virtual-screens" "$DISPATCHER"
   install -o root -g root -m 644 "$HERE/../system/70-omarchy-virtual-screens.rules" "$UDEV_RULE"
@@ -58,19 +80,17 @@ setup() {
       ipv4.never-default yes ipv6.never-default yes ipv4.ignore-auto-dns yes ipv6.ignore-auto-dns yes >/dev/null
 
   # Firewall: Sunshine's ports on USB tethering links only. Wi-Fi is opened by the
-  # dispatcher, and only on trusted networks.
-  if ufw_active; then
-    local b p
-    for b in $BASES; do
-      for p in $(ports "$b"); do
-        ufw allow in on 'tether+' to any port "${p%/*}" proto "${p#*/}" comment omarchy-virtual-screens >/dev/null
-      done
-    done
-  fi
+  # dispatcher, and only on trusted networks. (ufw skips rules it already has.)
+  ufw_active && usb_rules allow
 
   echo "$VERSION" > "$SYS_DIR/version"
   apply_wifi
-  echo "Set up"
+  # A phone that was already tethered keeps its old name until it reconnects.
+  if ip -br link | awk '{print $1}' | grep -q '^usb[0-9]'; then
+    echo "Set up. Turn USB tethering off and on once on the device that is plugged in."
+  else
+    echo "Set up"
+  fi
 }
 
 trust_wifi() {
@@ -89,18 +109,20 @@ untrust_wifi() {
 
 uninstall() {
   [[ -x $DISPATCHER ]] && "$DISPATCHER" none down || true   # closes any open Wi-Fi rules
-  if ufw_active; then
-    local b p
-    for b in $BASES; do
-      for p in $(ports "$b"); do
-        ufw --force delete allow in on 'tether+' to any port "${p%/*}" proto "${p#*/}" >/dev/null 2>&1 || true
-      done
-    done
-  fi
+  ufw_active && usb_rules delete
   nmcli connection delete "$NM_PROFILE" >/dev/null 2>&1 || true
   rm -f "$DISPATCHER" "$UDEV_RULE" "$LIBEXEC"
   rm -rf "$SYS_DIR" /var/lib/omarchy-virtual-screens /run/omarchy-virtual-screens
   udevadm control --reload
+
+  # The user who asked (pkexec sets PKEXEC_UID): stop their screens' Sunshine
+  # and remove their configs, pairings and login, so this one command is enough.
+  if [[ ${PKEXEC_UID:-} =~ ^[0-9]+$ && $PKEXEC_UID != 0 ]]; then
+    local home
+    home=$(getent passwd "$PKEXEC_UID" | cut -d: -f6)
+    pkill -u "$PKEXEC_UID" -f '^sunshine .*/virtual-screens/screen-[0-9]+/sunshine\.conf$' 2>/dev/null || true
+    [[ -n $home && -d $home/.config/virtual-screens ]] && rm -rf --one-file-system "$home/.config/virtual-screens"
+  fi
   echo "Removed (Sunshine itself is left installed)"
 }
 

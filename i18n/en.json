@@ -44,5 +44,12 @@
   "sound.nowDevice": "Sound now plays on the device.",
   "sound.nowLaptop": "Sound now plays on the laptop.",
   "sound.reconnect": "Reconnect in Moonlight (tap the PC → Desktop).",
-  "sound.failed": "Switching sound took too long. Try again, or turn the screen off and on."
+  "sound.failed": "Switching sound took too long. Try again, or turn the screen off and on.",
+  "setup.updateText": "This version of Virtual Screens changes its firewall and USB setup. Update it to keep everything working (asks for your password).",
+  "setup.update": "Update",
+  "uninstall.button": "Uninstall…",
+  "uninstall.running": "Uninstalling…",
+  "uninstall.confirm": "Turn off all screens and remove Virtual Screens: its firewall rules, USB and Wi-Fi setup, pairings and this plugin. Sunshine stays installed. Asks for your password.",
+  "uninstall.yes": "Uninstall",
+  "uninstall.cancel": "Cancel"
 }

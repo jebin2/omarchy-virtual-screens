@@ -25,13 +25,16 @@ Panel {
   readonly property string rootHelperInstalled: "/usr/local/libexec/omarchy-virtual-screens-root"
 
   readonly property var vsNumbers: [2, 3, 4]       // fixed, so rows aren't rebuilt on refresh
-  property var info: ({ screens: [], ready: true, wifi: null })
+  // Nothing is shown until the first info-all arrives (loaded: true).
+  property var info: ({ loaded: false, screens: [], ready: false, wifi: null })
   // n -> {kind: "power"|"audio", target, wasOn, started}: an action in flight.
   // The row stays locked until info-all shows it done (or it times out).
   property var vsPending: ({})
   property int vsExpanded: -1                       // n of the row opened with the arrow
   property int vsPairFormFor: -1                    // n with "Pair a different device" open
   property int vsPairingFor: -1                     // n while a pair command runs
+  property var vsHidden: ({})                       // n -> true: details closed with the arrow
+  property int vsForgetFor: -1                      // n while a forget command runs
   property int vsMsgFor: -1
   property string vsMsg: ""
   property bool vsMsgOk: false
@@ -40,6 +43,9 @@ Panel {
   property string rootAction: ""       // "setup" | "wifi" while running
   property string rootFailedAction: ""
   property bool rootRunning: false
+  property string rootNote: ""         // a hint from a successful setup
+  property bool confirmUninstall: false
+  property bool uninstalling: false
 
   property bool cursorActive: false
   property int selectedIndex: 0
@@ -70,8 +76,9 @@ Panel {
     var now = Date.now()
     for (var key in root.vsPending) {
       var n = parseInt(key, 10), e = root.vsPending[key], d = vsData(n)
-      var done = e.kind === "power" ? d.on === e.target
-                                    : (d.audio === e.target && (!e.wasOn || d.on))
+      // The script holds the screen's lock until it's finished (d.busy).
+      var done = !d.busy && (e.kind === "power" ? d.on === e.target
+                                                : (d.audio === e.target && (!e.wasOn || d.on)))
       if (done) {
         vsSetPending(n, null)
         if (e.kind === "audio") {
@@ -80,7 +87,7 @@ Panel {
           root.vsMsg = (e.target === "device" ? strings.t("sound.nowDevice") : strings.t("sound.nowLaptop"))
             + (e.wasOn ? " " + strings.t("sound.reconnect") : "")
         }
-      } else if (now - e.started > 15000) {
+      } else if (now - e.started > 30000) {
         vsSetPending(n, null)
         if (e.kind === "audio") {
           root.vsMsgFor = n
@@ -95,7 +102,14 @@ Panel {
     return d.on && (d.devices.length === 0 || root.vsPairFormFor === n)
   }
   function vsIsOpen(n) {
-    return root.vsExpanded === n || vsShowsPairForm(n) || (root.vsMsgFor === n && root.vsMsg !== "") || !!vsData(n).error
+    if (root.vsExpanded === n) return true
+    if (root.vsHidden[n]) return false
+    return vsShowsPairForm(n) || (root.vsMsgFor === n && root.vsMsg !== "") || !!vsData(n).error
+  }
+  function vsSetHidden(n, hidden) {
+    var h = Object.assign({}, root.vsHidden)
+    if (hidden) h[n] = true; else delete h[n]
+    root.vsHidden = h
   }
 
   function run(args) { Quickshell.execDetached(["bash", root.vsCmd].concat(args)) }
@@ -104,6 +118,7 @@ Panel {
     if (vsIsBusy(n) || !root.info.ready) return
     var on = vsData(n).on
     vsSetPending(n, { kind: "power", target: !on, wasOn: on, started: Date.now() })
+    vsSetHidden(n, false)
     if (root.vsMsgFor === n) root.vsMsg = ""
     // Detached so Sunshine keeps running after this call returns.
     run([String(n), on ? "stop" : "start"])
@@ -111,6 +126,7 @@ Panel {
   function vsPair(n, pin, name) {
     if (pairProc.running) return
     root.vsPairingFor = n
+    vsSetHidden(n, false)
     root.vsMsgFor = n
     root.vsMsg = strings.t("details.pairing")
     root.vsMsgOk = true
@@ -118,8 +134,10 @@ Panel {
     pairProc.running = true
   }
   function vsForget(n, uuid) {
-    smallProc.command = ["bash", root.vsCmd, String(n), "forget", uuid]
-    if (!smallProc.running) smallProc.running = true
+    if (forgetProc.running) return
+    root.vsForgetFor = n
+    forgetProc.command = ["bash", root.vsCmd, String(n), "forget", uuid]
+    forgetProc.running = true
   }
   function vsAudio(n, where) {
     var d = vsData(n)
@@ -136,8 +154,11 @@ Panel {
     root.rootAction = action
     root.rootMsg = ""
     root.rootLog = ""
-    var helper = root.info.system ? root.rootHelperInstalled : (root.binDir + "/virtual-screen-root")
-    rootProc.command = root.info.system ? ["pkexec", helper].concat(args) : ["pkexec", "bash", helper].concat(args)
+    root.rootNote = ""
+    // setup installs from the plugin's files; trust/untrust use the root-owned copy.
+    rootProc.command = (action !== "setup" && root.info.system)
+      ? ["pkexec", root.rootHelperInstalled].concat(args)
+      : ["pkexec", "bash", root.binDir + "/virtual-screen-root"].concat(args)
     rootProc.running = true
   }
 
@@ -145,13 +166,22 @@ Panel {
 
   // Opens a pre-filled GitHub issue in the browser; the user reviews it there.
   function reportRoot() {
+    if (reportProc.running) return
     var title = (root.rootFailedAction === "setup" ? "Setup failed: " : "Wi-Fi change failed: ") + root.rootMsg
     reportProc.command = ["bash", root.vsCmd, "issue-url", title, root.rootLog]
-    if (!reportProc.running) reportProc.running = true
+    reportProc.running = true
   }
   function reportScreen(n) {
+    if (reportProc.running) return
     reportProc.command = ["bash", root.vsCmd, String(n), "report"]
-    if (!reportProc.running) reportProc.running = true
+    reportProc.running = true
+  }
+  // Detached: the plugin removes itself at the end, which unloads this panel.
+  function uninstall() {
+    root.confirmUninstall = false
+    root.uninstalling = true
+    run(["uninstall"])
+    uninstallReset.restart()
   }
 
   function ensureCursorVisible(item) {
@@ -166,6 +196,13 @@ Panel {
   }
 
   Component.onCompleted: refresh()
+
+  // If the password prompt is dismissed the plugin stays; let the button work again.
+  Timer {
+    id: uninstallReset
+    interval: 20000
+    onTriggered: root.uninstalling = false
+  }
   onOpenedChanged: if (opened) { refresh(); cursorActive = false; selectedIndex = 0 }
 
   Timer {
@@ -210,9 +247,18 @@ Panel {
   }
 
   Process {
-    id: smallProc
-    stdout: StdioCollector { waitForEnd: true }
-    onRunningChanged: if (!running) root.refresh()
+    id: forgetProc
+    stdout: StdioCollector { id: forgetOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        var out = String(forgetOut.text || "").trim().split("\n")
+        root.vsMsgFor = root.vsForgetFor
+        root.vsMsgOk = false
+        root.vsMsg = out[out.length - 1] || strings.t("error.exit").arg(exitCode)
+      }
+      root.vsForgetFor = -1
+      root.refresh()
+    }
   }
 
   Process {
@@ -223,10 +269,17 @@ Panel {
       root.rootRunning = false
       var action = root.rootAction
       root.rootAction = ""
-      // 126/127: the password prompt was dismissed; not a failure.
-      if (exitCode !== 0 && exitCode !== 126 && exitCode !== 127) {
-        var out = (String(rootOut.text || "") + "\n" + String(rootErr.text || "")).trim()
-        var lines = out.split("\n").filter(function(l) { return l.trim() !== "" })
+      var out = (String(rootOut.text || "") + "\n" + String(rootErr.text || "")).trim()
+      var lines = out.split("\n").filter(function(l) { return l.trim() !== "" })
+      if (exitCode === 0) {
+        root.rootFailedAction = ""
+        // e.g. "Set up. Turn USB tethering off and on once …"
+        var last = lines.length ? lines[lines.length - 1] : ""
+        if (action === "setup" && last.indexOf(". ") > 0) root.rootNote = last.substring(last.indexOf(". ") + 2)
+      }
+      // 126: the password prompt was dismissed; not a failure. (127 is
+      // "not authorized" or an error, so it is reported.)
+      if (exitCode !== 0 && exitCode !== 126) {
         root.rootMsg = lines.length ? lines[lines.length - 1] : strings.t("error.exit").arg(exitCode)
         root.rootLog = "exit code " + exitCode + "\n" + lines.slice(-40).join("\n")
         root.rootFailedAction = action
@@ -266,6 +319,8 @@ Panel {
     Button {
       text: strings.t("error.report")
       iconText: "󰊤"
+      enabled: !reportProc.running
+      opacity: enabled ? 1.0 : 0.6
       fontSize: Style.font.caption
       foreground: root.bar.foreground
       fontFamily: root.bar.fontFamily
@@ -364,9 +419,9 @@ Panel {
             }
           }
 
-          // ---------- One-time setup ----------
+          // ---------- One-time setup (or an update of the system part) ----------
           Column {
-            visible: !root.info.ready
+            visible: root.info.loaded === true && (!root.info.ready || root.info.update === true)
             width: parent.width
             spacing: Style.space(10)
 
@@ -374,10 +429,11 @@ Panel {
               width: parent.width
               wrapMode: Text.WordWrap
               elide: Text.ElideNone
-              text: strings.t("setup.text")
+              text: root.info.ready ? strings.t("setup.updateText") : strings.t("setup.text")
             }
             Button {
-              text: root.rootAction === "setup" ? strings.t("setup.running") : strings.t("setup.button")
+              text: root.rootAction === "setup" ? strings.t("setup.running")
+                : root.info.ready ? strings.t("setup.update") : strings.t("setup.button")
               iconText: root.rootAction === "setup" ? "󰑓" : ""
               iconSpinning: root.rootAction === "setup"
               enabled: !root.rootRunning
@@ -396,7 +452,7 @@ Panel {
 
           // ---------- Wi-Fi ----------
           Column {
-            visible: root.info.ready && root.info.wifi !== null && root.info.wifi !== undefined
+            visible: root.info.loaded === true && root.info.ready && root.info.wifi !== null && root.info.wifi !== undefined
             width: parent.width
             spacing: Style.space(8)
 
@@ -457,7 +513,7 @@ Panel {
 
           // ---------- Screens ----------
           Column {
-            visible: root.info.ready
+            visible: root.info.loaded === true && root.info.ready
             width: parent.width
             spacing: Style.space(6)
 
@@ -468,6 +524,14 @@ Panel {
               fontFamily: root.bar.fontFamily
             }
 
+            VsText {
+              visible: root.rootNote !== ""
+              width: parent.width
+              wrapMode: Text.WordWrap
+              elide: Text.ElideNone
+              text: "ⓘ " + root.rootNote
+            }
+
             Repeater {
               model: root.vsNumbers
               VirtualScreenBlock {
@@ -476,6 +540,61 @@ Panel {
                 width: panelColumn.width
                 screenNumber: modelData
                 rowIndex: index
+              }
+            }
+          }
+
+          // ---------- Uninstall ----------
+          Column {
+            visible: root.info.loaded === true
+            width: parent.width
+            spacing: Style.space(8)
+
+            PanelSeparator { foreground: root.bar.foreground }
+
+            Button {
+              visible: !root.confirmUninstall
+              text: root.uninstalling ? strings.t("uninstall.running") : strings.t("uninstall.button")
+              iconText: root.uninstalling ? "󰑓" : ""
+              iconSpinning: root.uninstalling
+              enabled: !root.uninstalling && !root.rootRunning
+              opacity: enabled ? 1.0 : 0.6
+              fontSize: Style.font.caption
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              bordered: true
+              onClicked: root.confirmUninstall = true
+            }
+
+            Column {
+              visible: root.confirmUninstall
+              width: parent.width
+              spacing: Style.space(6)
+
+              VsText {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                elide: Text.ElideNone
+                text: strings.t("uninstall.confirm")
+              }
+              Row {
+                spacing: Style.space(6)
+                Button {
+                  text: strings.t("uninstall.yes")
+                  fontSize: Style.font.caption
+                  foreground: Commons.Color.accent
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  onClicked: root.uninstall()
+                }
+                Button {
+                  text: strings.t("uninstall.cancel")
+                  fontSize: Style.font.caption
+                  foreground: root.bar.foreground
+                  fontFamily: root.bar.fontFamily
+                  bordered: true
+                  onClicked: root.confirmUninstall = false
+                }
               }
             }
           }
@@ -598,11 +717,13 @@ Panel {
             cursorShape: Qt.PointingHandCursor
             onClicked: {
               var n = block.screenNumber
-              if (root.vsExpanded === n) {
-                root.vsExpanded = -1
+              if (block.open) {
+                if (root.vsExpanded === n) root.vsExpanded = -1
                 if (root.vsPairFormFor === n) root.vsPairFormFor = -1
                 if (root.vsMsgFor === n) root.vsMsg = ""
+                root.vsSetHidden(n, true)
               } else {
+                root.vsSetHidden(n, false)
                 root.vsExpanded = n
               }
             }
@@ -713,7 +834,8 @@ Panel {
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
               bordered: true
-              opacity: pinField.text.length === 4 ? 1.0 : 0.45
+              enabled: !pairProc.running
+              opacity: pinField.text.length === 4 && enabled ? 1.0 : 0.45
               anchors.verticalCenter: parent.verticalCenter
               onClicked: if (pinField.text.length === 4) root.vsPair(block.screenNumber, pinField.text, nameField.text.trim())
             }
@@ -762,7 +884,9 @@ Panel {
               Button {
                 id: forgetButton
                 anchors.right: parent.right
-                text: strings.t("details.forget")
+                text: root.vsForgetFor === block.screenNumber ? "…" : strings.t("details.forget")
+                enabled: !forgetProc.running
+                opacity: enabled ? 1.0 : 0.5
                 fontSize: Style.font.caption
                 foreground: root.bar.foreground
                 fontFamily: root.bar.fontFamily
