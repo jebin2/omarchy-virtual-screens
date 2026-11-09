@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "jebin2.virtual-screens",
+  "name": "Virtual Screens",
+  "version": "0.1.0",
+  "author": "jebin2",
+  "license": "MIT",
+  "description": "Turn a tablet, phone or laptop into an extra screen for Omarchy over USB or Wi-Fi, with Sunshine and Moonlight. Setup, login and pairing all happen in the bar panel.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Virtual Screens",
+    "description": "Extra screens on other devices: turn them on, pair with a PIN, choose where sound plays.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

@@ -1,0 +1,6 @@
+# Virtual Screens (Omarchy plugin jebin2.virtual-screens): name Android USB
+# tethering links tether0, tether1, ... so the firewall can allow the virtual
+# screens on "tether+" without opening any other wired network.
+# Note: cdc_ncm is also used by some USB-C docks' Ethernet; such a dock is named
+# tether* too and gets the same Sunshine-only rules.
+SUBSYSTEM=="net", ACTION=="add", DRIVERS=="rndis_host|cdc_ncm", NAME="tether%n"

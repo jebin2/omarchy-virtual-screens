@@ -1,0 +1,314 @@
+#!/bin/bash
+# Virtual Screens for Omarchy: extra screens shown on other devices (tablet,
+# phone, laptop) with Sunshine (here) + Moonlight (on the device).
+# Everything is automatic: config, login, pairing, and the screen's resolution.
+#
+#   virtual-screen [N] [start|stop|toggle|status]   N = 2, 3 or 4 (default 2)
+#   virtual-screen [N] pair PIN [NAME]              type the PIN Moonlight shows
+#   virtual-screen [N] forget UUID                  unpair a device
+#   virtual-screen [N] audio laptop|device          where that screen's sound plays
+#   virtual-screen info-all                         JSON for the bar panel
+#   virtual-screen status-all                       "N on|off" for every screen
+#   virtual-screen [N] fit                          (Sunshine calls this) resize SCREEN-N
+#                                                   to the connecting device
+#
+# Screen N is a virtual Hyprland output SCREEN-N streamed by its own Sunshine
+# instance in ~/.config/virtual-screens/screen-N/, on ports
+# 47984+100*(N-1) .. 48010+100*(N-1) (screen 2: 48084-48110). These are not
+# Sunshine's default ports, so a normal Sunshine install keeps working beside it.
+# One generated login (~/.config/virtual-screens/login, 0600) is set on every
+# instance with `sunshine --creds`; pairing goes through each instance's local
+# API (https://127.0.0.1:<port+1>, reachable from this laptop only).
+#
+# The system part (firewall, USB naming, Wi-Fi rules) is installed once by
+# virtual-screen-root, see README.md.
+set -uo pipefail
+
+SCREENS=(2 3 4)
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+CONF_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/virtual-screens"
+LOGIN_FILE="$CONF_ROOT/login"
+SYS_DIR=/etc/omarchy-virtual-screens
+WIFI_FLAG=/run/omarchy-virtual-screens/wifi-open
+
+ordinal() { case $1 in 2) echo Second ;; 3) echo Third ;; 4) echo Fourth ;; *) echo "Screen $1" ;; esac; }
+
+setup() {
+  N=$1
+  NAME="SCREEN-$N"
+  CONF_DIR="$CONF_ROOT/screen-$N"
+  CONF="$CONF_DIR/sunshine.conf"
+  BASE=$((47989 + (N - 1) * 100))
+  API="https://127.0.0.1:$((BASE + 1))"
+  RUN="${XDG_RUNTIME_DIR:-/tmp}/virtual-screens/$N"
+  TITLE="$(ordinal "$N") screen"
+  mkdir -p "$RUN"
+}
+
+notify() { notify-send -a "Virtual screens" "$TITLE" "$1" 2>/dev/null; echo "$1"; }
+running() { [[ -f $RUN/pid ]] && kill -0 "$(<"$RUN/pid")" 2>/dev/null; }
+have_output() { hyprctl monitors all -j | jq -e --arg n "$NAME" 'any(.[]; .name == $n)' >/dev/null; }
+
+make_output() {
+  have_output || hyprctl output create headless "$NAME" >/dev/null
+  sleep 0.5
+}
+
+# ---- login --------------------------------------------------------------------
+
+ensure_login() {
+  if [[ ! -s $LOGIN_FILE ]]; then
+    mkdir -p "$CONF_ROOT"
+    ( umask 077; printf 'omarchy %s\n' "$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)" > "$LOGIN_FILE" )
+  fi
+  chmod 600 "$LOGIN_FILE"
+  read -r USER_NAME USER_PASS < "$LOGIN_FILE"
+}
+
+api() {  # api METHOD PATH [JSON]
+  local args=(-sk --max-time 15 -u "$USER_NAME:$USER_PASS" -X "$1" "$API$2")
+  [[ -n ${3:-} ]] && args+=(-H 'Content-Type: application/json' -d "$3")
+  curl "${args[@]}"
+}
+
+login_ok() { [[ $(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' -u "$USER_NAME:$USER_PASS" "$API/api/clients/list") == 200 ]]; }
+
+# ---- config -------------------------------------------------------------------
+
+# Hardware video encoder: Intel/AMD through VA-API first (lighter on hybrid
+# laptops), NVIDIA's NVENC otherwise. Override with
+# ~/.config/virtual-screens/sunshine-extra.conf (appended to every instance).
+encoder_lines() {
+  local dev vendor nvidia=""
+  for dev in /sys/class/drm/renderD*; do
+    [[ -e $dev/device/vendor ]] || continue
+    vendor=$(<"$dev/device/vendor")
+    case $vendor in
+      0x8086|0x1002) printf 'encoder = vaapi\nadapter_name = /dev/dri/%s\n' "${dev##*/}"; return ;;
+      0x10de) nvidia=1 ;;
+    esac
+  done
+  [[ -n $nvidia ]] && echo "encoder = nvenc"
+}
+
+write_config() {
+  mkdir -p "$CONF_DIR/credentials"
+  local audio=disabled
+  grep -q '^stream_audio = enabled' "$CONF" 2>/dev/null && audio=enabled
+  {
+    cat <<EOF
+# Written by virtual-screen on every start; put your own settings in
+# $CONF_ROOT/sunshine-extra.conf instead.
+sunshine_name = $(hostname)-screen-$N
+port = $BASE
+output_name = $NAME
+capture = wlr
+$(encoder_lines)
+origin_web_ui_allowed = pc
+upnp = disabled
+stream_audio = $audio
+file_state = $CONF_DIR/sunshine_state.json
+credentials_file = $CONF_DIR/sunshine_state.json
+file_apps = $CONF_DIR/apps.json
+log_path = $CONF_DIR/sunshine.log
+pkey = $CONF_DIR/credentials/cakey.pem
+cert = $CONF_DIR/credentials/cacert.pem
+# Resize SCREEN-$N to the device's resolution when it connects.
+global_prep_cmd = [{"do":"bash $SELF $N fit","undo":""}]
+EOF
+    [[ -f $CONF_ROOT/sunshine-extra.conf ]] && cat "$CONF_ROOT/sunshine-extra.conf"
+  } > "$CONF.new"
+  mv "$CONF.new" "$CONF"
+  [[ -f $CONF_DIR/apps.json ]] || echo '{"env":{},"apps":[{"name":"Desktop","image-path":"desktop.png"}]}' > "$CONF_DIR/apps.json"
+  # Set the login on this instance whenever the saved one is new to it.
+  local mark; mark=$(sha256sum "$LOGIN_FILE" | cut -c1-16)
+  if [[ $(cat "$CONF_DIR/.login-set" 2>/dev/null) != "$mark" ]]; then
+    sunshine "$CONF" --creds "$USER_NAME" "$USER_PASS" >/dev/null 2>&1 && echo "$mark" > "$CONF_DIR/.login-set"
+  fi
+}
+
+# ---- start / stop ---------------------------------------------------------------
+
+launch_sunshine() {
+  sunshine "$CONF" >/dev/null 2>&1 &
+  echo $! > "$RUN/pid"
+}
+
+# Addresses a device can use: USB tethering links, plus Wi-Fi while the trusted
+# Wi-Fi rules are open. Format: "KIND ADDRESS" per line.
+addresses() {
+  local ifc addr
+  while read -r ifc _ addr _; do
+    case $ifc in
+      tether*) echo "USB ${addr%/*}" ;;
+      wl*) [[ -e $WIFI_FLAG ]] && echo "Wi-Fi ${addr%/*}" ;;
+    esac
+  done < <(ip -4 -br addr)
+}
+
+start() {
+  command -v sunshine >/dev/null || { notify "Sunshine is not installed. Open the Virtual Screens panel and press Set up."; return 1; }
+  ensure_login
+  write_config
+  make_output
+  launch_sunshine
+  local i
+  for i in $(seq 1 20); do running || break; login_ok && break; sleep 0.5; done
+  if ! running; then
+    notify "Sunshine failed to start, see $CONF_DIR/sunshine.log"; stop >/dev/null; return 1
+  fi
+  if ! login_ok; then  # login out of step (state file replaced): set it again
+    kill "$(<"$RUN/pid")"; sleep 1
+    rm -f "$CONF_DIR/.login-set"; write_config; launch_sunshine
+  fi
+  local where
+  where=$(addresses | awk -v p=":$BASE" '{printf "%s%s %s%s", (NR>1?", ":""), $1, $2, p}')
+  notify "On — in Moonlight, add this PC${where:+: $where}"
+}
+
+stop() {
+  running && kill "$(<"$RUN/pid")" 2>/dev/null
+  rm -f "$RUN/pid"
+  have_output && hyprctl output remove "$NAME" >/dev/null
+  notify "Off"
+}
+
+# Sunshine runs this before a stream starts, with the device's requested size.
+fit() {
+  local w=${SUNSHINE_CLIENT_WIDTH:-} h=${SUNSHINE_CLIENT_HEIGHT:-} fps=${SUNSHINE_CLIENT_FPS:-60} scale=1
+  [[ $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ && $fps =~ ^[0-9]+$ ]] || exit 0
+  # Roughly "same text size as a laptop": Hyprland snaps it to a clean scale.
+  if (( w >= 2400 )); then scale=2; elif (( w >= 1900 )); then scale=1.5; fi
+  hyprctl eval "hl.monitor({ output = \"$NAME\", mode = \"${w}x${h}@${fps}\", position = \"auto-right\", scale = $scale })" >/dev/null 2>&1
+  sleep 0.5
+  exit 0
+}
+
+# ---- devices --------------------------------------------------------------------
+
+client_uuids() { api GET /api/clients/list | jq -r '.named_certs[]?.uuid' | sort; }
+
+# Success is a NEW client in Sunshine's list, not just an accepted PIN:
+# Sunshine can accept a PIN and save nothing.
+pair() {
+  local pin=${1:-} name=${2:-}
+  [[ $pin =~ ^[0-9]{4}$ ]] || { echo "The PIN is the 4 digits Moonlight shows"; return 2; }
+  [[ -n $name ]] || name="$(ordinal "$N") screen device"
+  name=$(printf '%s' "$name" | tr -cd '[:alnum:] ._-' | head -c 32)
+  running || { echo "Turn the screen on first"; return 2; }
+  ensure_login
+  local before ids="" accepted=false body resp i id
+  before=$(client_uuids)
+  for i in $(seq 1 5); do  # the request may still be on its way
+    ids=$(api GET /api/pin | jq -r '.pairings[]?.id | tostring' 2>/dev/null)
+    [[ -n $ids ]] && break
+    sleep 1
+  done
+  if [[ -n $ids ]]; then
+    for id in $(tac <<<"$ids"); do  # newest first; only the right one takes the PIN
+      body=$(jq -nc --arg id "$id" --arg pin "$pin" --arg name "$name" '{pairing_id:$id, pin:$pin, name:$name}')
+      resp=$(api POST /api/pin "$body")
+      [[ $resp == *'"status":true'* ]] && { accepted=true; break; }
+    done
+  else  # older Sunshine API without pairing ids
+    resp=$(api POST /api/pin "$(jq -nc --arg pin "$pin" --arg name "$name" '{pin:$pin, name:$name}')")
+    [[ $resp == *'"status":true'* ]] && accepted=true
+  fi
+  $accepted || { echo "Wrong PIN, or Moonlight isn't waiting. In Moonlight tap this PC, then type the PIN it shows."; return 1; }
+  for i in $(seq 1 15); do
+    [[ -n $(comm -13 <(echo "$before") <(client_uuids)) ]] && { echo "Paired: $name"; return 0; }
+    sleep 1
+  done
+  echo "Sunshine took the PIN but saved no device. Try pairing again."; return 1
+}
+
+forget() {
+  local uuid=${1:-} st="$CONF_DIR/sunshine_state.json"
+  [[ $uuid =~ ^[A-Za-z0-9-]+$ ]] || { echo "usage: virtual-screen $N forget UUID"; return 2; }
+  if running; then
+    ensure_login
+    api POST /api/clients/unpair "$(jq -nc --arg u "$uuid" '{uuid:$u}')" >/dev/null
+  elif [[ -f $st ]]; then
+    jq --arg u "$uuid" '.root.named_devices |= map(select(.uuid != $u))' "$st" > "$st.new" && mv "$st.new" "$st"
+  fi
+  echo "Forgot the device"
+}
+
+set_audio() {
+  local val
+  case "${1:-}" in
+    laptop) val=disabled ;;
+    device) val=enabled ;;
+    *) echo "usage: virtual-screen $N audio laptop|device"; return 2 ;;
+  esac
+  [[ -f $CONF ]] || { ensure_login; write_config; }
+  sed -i "s/^stream_audio = .*/stream_audio = $val/" "$CONF"
+  # Sunshine reads its config at start: restart it if it is streaming now.
+  if running; then
+    kill "$(<"$RUN/pid")"; sleep 2
+    launch_sunshine
+    notify "Sound on the $1 — reconnect in Moonlight (tap the PC → Desktop)"
+  else
+    notify "Sound on the $1"
+  fi
+}
+
+# ---- panel ----------------------------------------------------------------------
+
+info() {
+  local on=false audio=laptop devices
+  running && on=true
+  grep -q '^stream_audio = enabled' "$CONF" 2>/dev/null && audio=device
+  devices=$(jq -c '[.root.named_devices[]? | {name, uuid}]' "$CONF_DIR/sunshine_state.json" 2>/dev/null) || devices='[]'
+  [[ -n $devices ]] || devices='[]'
+  jq -nc --argjson n "$N" --arg title "$TITLE" --argjson on "$on" --arg audio "$audio" \
+     --arg port "$BASE" --argjson devices "$devices" \
+     --argjson addrs "$(addresses | jq -Rnc '[inputs | split(" ") | {kind: .[0], addr: .[1]}]')" \
+     '{n: $n, title: $title, on: $on, audio: $audio, port: ($port | tonumber),
+       addresses: [$addrs[] | .addr += (":" + $port)], devices: $devices}'
+}
+
+# Everything the panel shows, in one call.
+info_all() {
+  local screens wifi_name="" wifi_uuid="" trusted=false sunshine=false system=false
+  screens=$(for s in "${SCREENS[@]}"; do setup "$s"; info; done | jq -sc .)
+  command -v sunshine >/dev/null && sunshine=true
+  [[ -f $SYS_DIR/version ]] && system=true
+  IFS=: read -r wifi_name wifi_uuid < <(nmcli -t -f NAME,UUID,TYPE con show --active 2>/dev/null \
+    | awk -F: '$3 == "802-11-wireless" {print $1 ":" $2; exit}')
+  [[ -n $wifi_uuid ]] && grep -qx "$wifi_uuid" "$SYS_DIR/trusted-wifi" 2>/dev/null && trusted=true
+  jq -nc --argjson screens "$screens" --argjson sunshine "$sunshine" --argjson system "$system" \
+     --arg wname "$wifi_name" --arg wuuid "$wifi_uuid" --argjson trusted "$trusted" \
+     --argjson open "$([[ -e $WIFI_FLAG ]] && echo true || echo false)" \
+     --arg root "$(dirname "$SELF")/virtual-screen-root" \
+     '{screens: $screens, ready: ($sunshine and $system), sunshine: $sunshine, system: $system,
+       rootHelper: $root,
+       wifi: (if $wuuid == "" then null else {name: $wname, uuid: $wuuid, trusted: $trusted, open: $open} end)}'
+}
+
+# ---- main -----------------------------------------------------------------------
+
+case ${1:-} in
+  status-all)
+    for s in "${SCREENS[@]}"; do setup "$s"; running && echo "$s on" || echo "$s off"; done
+    exit 0 ;;
+  info-all) info_all; exit 0 ;;
+esac
+
+n=2
+if [[ ${1:-} =~ ^[0-9]+$ ]]; then n=$1; shift; fi
+[[ " ${SCREENS[*]} " == *" $n "* ]] || { echo "screen must be one of: ${SCREENS[*]}"; exit 1; }
+setup "$n"
+
+case "${1:-toggle}" in
+  start) running && notify "Already on" || start ;;
+  stop) stop ;;
+  toggle) if running; then stop; else start; fi ;;
+  status) running && echo on || echo off ;;
+  pair) pair "${2:-}" "${3:-}" ;;
+  forget) forget "${2:-}" ;;
+  audio) set_audio "${2:-}" ;;
+  fit) fit ;;
+  info) info ;;
+  *) echo "usage: virtual-screen [2|3|4] [start|stop|toggle|status|pair PIN [NAME]|forget UUID|audio laptop|device] | info-all | status-all"; exit 1 ;;
+esac

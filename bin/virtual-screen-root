@@ -1,0 +1,113 @@
+#!/bin/bash
+# Virtual Screens: the system part, run as root through pkexec from the panel.
+#
+#   virtual-screen-root setup              install Sunshine, USB naming, firewall, Wi-Fi rules
+#   virtual-screen-root trust-wifi UUID    allow virtual screens on this Wi-Fi connection
+#   virtual-screen-root untrust-wifi UUID  stop allowing them there
+#   virtual-screen-root uninstall          remove everything setup added
+#
+# setup copies this script to /usr/local/libexec/omarchy-virtual-screens-root
+# (root-owned). The panel calls that copy afterwards, so later password prompts
+# never run a file a user process could have changed.
+set -euo pipefail
+
+[[ $EUID == 0 ]] || { echo "run as root (the panel uses pkexec)" >&2; exit 1; }
+
+HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+SYS_DIR=/etc/omarchy-virtual-screens
+LIBEXEC=/usr/local/libexec/omarchy-virtual-screens-root
+DISPATCHER=/etc/NetworkManager/dispatcher.d/90-omarchy-virtual-screens
+UDEV_RULE=/etc/udev/rules.d/70-omarchy-virtual-screens.rules
+NM_PROFILE="Virtual screens USB"
+BASES="48089 48189 48289"   # screens 2, 3, 4 (see virtual-screen)
+VERSION=1
+
+# Sunshine's ports for one screen: "PORT/PROTO" per line.
+ports() {
+  local b=$1
+  printf '%s/tcp\n' $((b - 5)) "$b" $((b + 21))
+  printf '%s/udp\n' "$((b + 9)):$((b + 11))" $((b + 13)) $((b + 21))
+}
+
+ufw_active() { command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; }
+
+valid_uuid() { [[ ${1:-} =~ ^[0-9a-fA-F-]{36}$ ]]; }
+
+# Re-run the dispatcher for the Wi-Fi that is up now, so a trust change applies at once.
+apply_wifi() {
+  local dev uuid
+  read -r dev uuid < <(nmcli -t -f DEVICE,UUID,TYPE con show --active | awk -F: '$3 == "802-11-wireless" {print $1, $2; exit}') || true
+  [[ -n ${dev:-} && -x $DISPATCHER ]] || return 0
+  CONNECTION_UUID=$uuid "$DISPATCHER" "$dev" up
+}
+
+setup() {
+  # Sunshine (Omarchy's package repo carries it).
+  command -v sunshine >/dev/null || pacman -S --needed --noconfirm sunshine
+
+  install -d -m 755 "$SYS_DIR" /usr/local/libexec
+  [[ -f $SYS_DIR/trusted-wifi ]] || install -m 644 /dev/null "$SYS_DIR/trusted-wifi"
+  install -o root -g root -m 755 "$HERE/virtual-screen-root" "$LIBEXEC"
+  install -o root -g root -m 755 "$HERE/../system/90-omarchy-virtual-screens" "$DISPATCHER"
+  install -o root -g root -m 644 "$HERE/../system/70-omarchy-virtual-screens.rules" "$UDEV_RULE"
+  udevadm control --reload
+
+  # USB tethering links (tether*) never become the internet route or DNS.
+  nmcli -t -f NAME con show | grep -qx "$NM_PROFILE" ||
+    nmcli connection add type ethernet con-name "$NM_PROFILE" ifname "*" match.interface-name "tether*" \
+      ipv4.never-default yes ipv6.never-default yes ipv4.ignore-auto-dns yes ipv6.ignore-auto-dns yes >/dev/null
+
+  # Firewall: Sunshine's ports on USB tethering links only. Wi-Fi is opened by the
+  # dispatcher, and only on trusted networks.
+  if ufw_active; then
+    local b p
+    for b in $BASES; do
+      for p in $(ports "$b"); do
+        ufw allow in on 'tether+' to any port "${p%/*}" proto "${p#*/}" comment omarchy-virtual-screens >/dev/null
+      done
+    done
+  fi
+
+  echo "$VERSION" > "$SYS_DIR/version"
+  apply_wifi
+  echo "Set up"
+}
+
+trust_wifi() {
+  valid_uuid "${1:-}" || { echo "bad connection UUID" >&2; exit 2; }
+  grep -qx "$1" "$SYS_DIR/trusted-wifi" || echo "$1" >> "$SYS_DIR/trusted-wifi"
+  apply_wifi
+  echo "Trusted"
+}
+
+untrust_wifi() {
+  valid_uuid "${1:-}" || { echo "bad connection UUID" >&2; exit 2; }
+  sed -i "/^$1\$/d" "$SYS_DIR/trusted-wifi"
+  apply_wifi
+  echo "No longer trusted"
+}
+
+uninstall() {
+  [[ -x $DISPATCHER ]] && "$DISPATCHER" none down || true   # closes any open Wi-Fi rules
+  if ufw_active; then
+    local b p
+    for b in $BASES; do
+      for p in $(ports "$b"); do
+        ufw --force delete allow in on 'tether+' to any port "${p%/*}" proto "${p#*/}" >/dev/null 2>&1 || true
+      done
+    done
+  fi
+  nmcli connection delete "$NM_PROFILE" >/dev/null 2>&1 || true
+  rm -f "$DISPATCHER" "$UDEV_RULE" "$LIBEXEC"
+  rm -rf "$SYS_DIR" /var/lib/omarchy-virtual-screens /run/omarchy-virtual-screens
+  udevadm control --reload
+  echo "Removed (Sunshine itself is left installed)"
+}
+
+case ${1:-} in
+  setup) setup ;;
+  trust-wifi) trust_wifi "${2:-}" ;;
+  untrust-wifi) untrust_wifi "${2:-}" ;;
+  uninstall) uninstall ;;
+  *) echo "usage: virtual-screen-root setup|trust-wifi UUID|untrust-wifi UUID|uninstall" >&2; exit 2 ;;
+esac
