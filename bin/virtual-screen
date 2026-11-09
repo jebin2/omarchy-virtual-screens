@@ -180,7 +180,7 @@ start() {
     fail "Sunshine failed to start"; stop >/dev/null; return 1
   fi
   if ! login_ok; then  # login out of step (state file replaced): set it again
-    kill "$(<"$RUN/pid")"; sleep 1
+    stop_sunshine
     rm -f "$CONF_DIR/.login-set"; write_config; launch_sunshine
   fi
   local where
@@ -189,7 +189,7 @@ start() {
 }
 
 stop() {
-  running && kill "$(<"$RUN/pid")" 2>/dev/null
+  running && stop_sunshine
   rm -f "$RUN/pid"
   have_output && hyprctl output remove "$NAME" >/dev/null
   notify "Off"
