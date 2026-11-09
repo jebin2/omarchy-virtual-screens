@@ -26,7 +26,9 @@ Panel {
 
   readonly property var vsNumbers: [2, 3, 4]       // fixed, so rows aren't rebuilt on refresh
   property var info: ({ screens: [], ready: true, wifi: null })
-  property var vsBusy: ({})                         // n -> true while starting/stopping
+  // n -> {kind: "power"|"audio", target, wasOn, started}: an action in flight.
+  // The row stays locked until info-all shows it done (or it times out).
+  property var vsPending: ({})
   property int vsExpanded: -1                       // n of the row opened with the arrow
   property int vsPairFormFor: -1                    // n with "Pair a different device" open
   property int vsPairingFor: -1                     // n while a pair command runs
@@ -56,7 +58,38 @@ Panel {
   function vsTitle(n) {
     return n === 2 ? strings.t("screen.second") : n === 3 ? strings.t("screen.third") : strings.t("screen.fourth")
   }
-  function vsIsBusy(n) { return root.vsBusy[n] === true }
+  function vsPendingOf(n) { return root.vsPending[n] || null }
+  function vsIsBusy(n) { return !!root.vsPending[n] }
+  function vsSetPending(n, entry) {
+    var p = Object.assign({}, root.vsPending)
+    if (entry) p[n] = entry; else delete p[n]
+    root.vsPending = p
+  }
+  // Called after every status refresh: finish actions whose result is visible.
+  function vsCheckPending() {
+    var now = Date.now()
+    for (var key in root.vsPending) {
+      var n = parseInt(key, 10), e = root.vsPending[key], d = vsData(n)
+      var done = e.kind === "power" ? d.on === e.target
+                                    : (d.audio === e.target && (!e.wasOn || d.on))
+      if (done) {
+        vsSetPending(n, null)
+        if (e.kind === "audio") {
+          root.vsMsgFor = n
+          root.vsMsgOk = true
+          root.vsMsg = (e.target === "device" ? strings.t("sound.nowDevice") : strings.t("sound.nowLaptop"))
+            + (e.wasOn ? " " + strings.t("sound.reconnect") : "")
+        }
+      } else if (now - e.started > 15000) {
+        vsSetPending(n, null)
+        if (e.kind === "audio") {
+          root.vsMsgFor = n
+          root.vsMsgOk = false
+          root.vsMsg = strings.t("sound.failed")
+        }
+      }
+    }
+  }
   function vsShowsPairForm(n) {
     var d = vsData(n)
     return d.on && (d.devices.length === 0 || root.vsPairFormFor === n)
@@ -69,11 +102,11 @@ Panel {
 
   function vsToggle(n) {
     if (vsIsBusy(n) || !root.info.ready) return
-    var b = Object.assign({}, root.vsBusy); b[n] = true; root.vsBusy = b
+    var on = vsData(n).on
+    vsSetPending(n, { kind: "power", target: !on, wasOn: on, started: Date.now() })
     if (root.vsMsgFor === n) root.vsMsg = ""
     // Detached so Sunshine keeps running after this call returns.
-    run([String(n), vsData(n).on ? "stop" : "start"])
-    settle.restart()
+    run([String(n), on ? "stop" : "start"])
   }
   function vsPair(n, pin, name) {
     if (pairProc.running) return
@@ -89,8 +122,11 @@ Panel {
     if (!smallProc.running) smallProc.running = true
   }
   function vsAudio(n, where) {
+    var d = vsData(n)
+    if (vsIsBusy(n) || d.audio === where) return
+    vsSetPending(n, { kind: "audio", target: where, wasOn: d.on, started: Date.now() })
+    if (root.vsMsgFor === n) root.vsMsg = ""
     run([String(n), "audio", where])
-    settle.restart()
   }
 
   // System changes go through pkexec (the shell shows the password prompt).
@@ -139,12 +175,13 @@ Panel {
     onTriggered: root.refresh()
   }
 
-  // start/stop take a moment (Sunshine, the headless output); re-check after.
+  // While an action is in flight, re-check often so the row unlocks as soon
+  // as it is done.
   Timer {
-    id: settle
-    interval: 2500
-    repeat: false
-    onTriggered: { root.vsBusy = ({}); root.refresh() }
+    interval: 700
+    repeat: true
+    running: Object.keys(root.vsPending).length > 0
+    onTriggered: root.refresh()
   }
 
   Process {
@@ -154,6 +191,7 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         try { root.info = JSON.parse(String(text || "{}")) } catch (e) {}
+        root.vsCheckPending()
       }
     }
   }
@@ -462,6 +500,11 @@ Panel {
     required property int rowIndex
     readonly property var sd: root.vsData(screenNumber)
     readonly property bool busy: root.vsIsBusy(screenNumber)
+    readonly property var pending: root.vsPendingOf(screenNumber)
+    readonly property bool powerPending: pending !== null && pending.kind === "power"
+    readonly property string audioTarget: pending !== null && pending.kind === "audio" ? pending.target : ""
+    // What the Sound buttons show: the choice in flight, else the real setting.
+    readonly property string audioShown: audioTarget !== "" ? audioTarget : (sd.audio || "laptop")
     readonly property bool expanded: root.vsExpanded === screenNumber
     readonly property bool open: root.vsIsOpen(screenNumber)
     readonly property color dim: Qt.darker(root.bar.foreground, 1.4)
@@ -478,7 +521,7 @@ Panel {
       fill: Style.hoverFillFor(root.bar.foreground, Commons.Color.accent)
       currentFill: Style.selectedFillFor(root.bar.foreground, Commons.Color.accent)
       implicitHeight: rowInner.implicitHeight + Style.spacing.xl
-      opacity: block.busy ? 0.6 : 1.0
+      opacity: block.powerPending ? 0.6 : 1.0
 
       // Declared first so the arrow's own MouseArea sits on top of it.
       MouseArea {
@@ -525,7 +568,7 @@ Panel {
         Text {
           id: stateText
           textFormat: Text.PlainText
-          text: block.busy ? (block.sd.on ? strings.t("state.stopping") : strings.t("state.starting"))
+          text: block.powerPending ? (block.sd.on ? strings.t("state.stopping") : strings.t("state.starting"))
                            : (block.sd.on ? strings.t("state.on") + "  󰄬" : strings.t("state.off"))
           color: block.sd.on ? root.bar.foreground : block.dim
           font.family: root.bar.fontFamily
@@ -768,21 +811,29 @@ Panel {
             }
             Button {
               text: strings.t("details.laptop")
+              iconText: block.audioTarget === "laptop" ? "󰑓" : ""
+              iconSpinning: block.audioTarget === "laptop"
+              enabled: !block.busy
+              opacity: enabled || block.audioTarget === "laptop" ? 1.0 : 0.5
               fontSize: Style.font.caption
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
               bordered: true
-              active: block.sd.audio !== "device"
-              onClicked: if (block.sd.audio === "device") root.vsAudio(block.screenNumber, "laptop")
+              active: block.audioShown === "laptop"
+              onClicked: root.vsAudio(block.screenNumber, "laptop")
             }
             Button {
               text: strings.t("details.device")
+              iconText: block.audioTarget === "device" ? "󰑓" : ""
+              iconSpinning: block.audioTarget === "device"
+              enabled: !block.busy
+              opacity: enabled || block.audioTarget === "device" ? 1.0 : 0.5
               fontSize: Style.font.caption
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
               bordered: true
-              active: block.sd.audio === "device"
-              onClicked: if (block.sd.audio !== "device") root.vsAudio(block.screenNumber, "device")
+              active: block.audioShown === "device"
+              onClicked: root.vsAudio(block.screenNumber, "device")
             }
           }
         }

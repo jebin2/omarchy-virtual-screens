@@ -40,5 +40,9 @@
   "details.device": "Device",
   "wifi.working": "Applying…",
   "error.report": "Report on GitHub",
-  "error.exit": "Failed (exit %1)"
+  "error.exit": "Failed (exit %1)",
+  "sound.nowDevice": "Sound now plays on the device.",
+  "sound.nowLaptop": "Sound now plays on the laptop.",
+  "sound.reconnect": "Reconnect in Moonlight (tap the PC → Desktop).",
+  "sound.failed": "Switching sound took too long. Try again, or turn the screen off and on."
 }
