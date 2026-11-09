@@ -6,6 +6,8 @@ Each extra screen is a virtual monitor in Hyprland, streamed to the device with 
 
 Everything happens in the bar panel: setup, turning screens on and off, pairing with a PIN and choosing where sound plays. You never need Sunshine's web page.
 
+![Virtual Screens panel](preview.png)
+
 ## Install
 
 ```bash
@@ -36,6 +38,14 @@ The virtual screen resizes itself to the device's resolution when it connects. N
 | **Report on GitHub** | Shown when something fails. Opens a pre-filled issue in your browser for you to review and send. |
 | **Update** | Shown after a plugin update that changes the system part. One password prompt. |
 | **Uninstall…** | Removes everything, see below. |
+
+## Screenshots
+
+| | | |
+|---|---|---|
+| ![First run](docs/screenshots/5-setup.png)<br>**First run:** one Set up button | ![Overview](docs/screenshots/1-overview.png)<br>**Overview:** one screen on, Wi-Fi allowed | ![Details](docs/screenshots/2-expanded.png)<br>**▾ Details:** address, paired device, sound |
+| ![Pairing](docs/screenshots/3-pair-new-device.png)<br>**New device:** type Moonlight's PIN | ![Wi-Fi not allowed](docs/screenshots/4-wifi-blocked.png)<br>**Other Wi-Fi:** USB only until you allow it | ![Failure](docs/screenshots/6-failure.png)<br>**Something failed:** report it on GitHub |
+| ![Uninstall](docs/screenshots/7-uninstall.png)<br>**Uninstall:** everything in one step | | |
 
 ## How it works
 
