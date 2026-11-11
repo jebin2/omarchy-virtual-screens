@@ -36,12 +36,17 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 BIN_DIR="$(dirname "$SELF")"
 CONF_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/virtual-screens"
 LOGIN_FILE="$CONF_ROOT/login"
-RUN_ROOT="${XDG_RUNTIME_DIR:-/tmp}/virtual-screens"
+# Runtime state (pid, lock, last error) lives only in the session's private
+# runtime dir. No shared /tmp fallback: there another account could create the
+# folder first and plant files or links in it. (hyprctl needs this dir too.)
+[[ -n ${XDG_RUNTIME_DIR:-} && -d $XDG_RUNTIME_DIR && -O $XDG_RUNTIME_DIR ]] ||
+  { echo "virtual-screen: XDG_RUNTIME_DIR is not set; run it from your desktop session" >&2; exit 1; }
+RUN_ROOT="$XDG_RUNTIME_DIR/virtual-screens"
 SYS_DIR=/etc/omarchy-virtual-screens
 LIBEXEC=/usr/local/libexec/omarchy-virtual-screens-root
 WIFI_FLAG=/run/omarchy-virtual-screens/wifi-open
 # The system part this version expects; must match VERSION in virtual-screen-root.
-SYSTEM_VERSION=2
+SYSTEM_VERSION=3
 
 ordinal() { case $1 in 2) echo Second ;; 3) echo Third ;; 4) echo Fourth ;; *) echo "Screen $1" ;; esac; }
 
@@ -91,8 +96,10 @@ is_busy() { ! flock -n "$RUN/lock" true 2>/dev/null; }
 # ---- login --------------------------------------------------------------------
 
 ensure_login() {
+  # Configs, Sunshine state (paired devices, the login's hash), keys and logs:
+  # private to this account, whatever modes Sunshine gives its own files.
+  mkdir -p "$CONF_ROOT" && chmod 700 "$CONF_ROOT"
   if [[ ! -s $LOGIN_FILE ]]; then
-    mkdir -p "$CONF_ROOT"
     ( umask 077; printf 'omarchy %s\n' "$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)" > "$LOGIN_FILE" )
   fi
   chmod 600 "$LOGIN_FILE"
