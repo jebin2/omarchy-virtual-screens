@@ -133,8 +133,24 @@ set_login_state() {  # write our login into this instance's Sunshine state file
   ) || { rm -f "$st.new"; return 1; }
 }
 
+# Sunshine's certificate is self-signed (its name never matches 127.0.0.1),
+# so instead of normal verification curl is pinned to the public key of this
+# instance's own certificate, which lives in our 0700 config dir. Another local
+# account that grabs the API port first can't present that key, so curl drops
+# the connection before sending the login. No certificate yet → no request.
+api_pin() {
+  local cert="$CONF_DIR/credentials/cacert.pem"
+  [[ -s $cert ]] || return 1
+  local key
+  key=$(openssl x509 -in "$cert" -pubkey -noout 2>/dev/null) && [[ $key == *"PUBLIC KEY"* ]] || return 1
+  printf 'sha256//%s' "$(openssl pkey -pubin -outform der <<<"$key" | openssl dgst -sha256 -binary | base64)"
+}
+
 # The login goes to curl on stdin (-K -), so it never shows up in `ps`.
-curl_api() { printf 'user = "%s:%s"\n' "$USER_NAME" "$USER_PASS" | curl -K - -sk "$@"; }
+curl_api() {
+  local pin; pin=$(api_pin) || return 1
+  printf 'user = "%s:%s"\n' "$USER_NAME" "$USER_PASS" | curl -K - -sk --pinnedpubkey "$pin" "$@"
+}
 
 api() {  # api METHOD PATH [JSON]
   local args=(--max-time 15 -X "$1" "$API$2")
