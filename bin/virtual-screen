@@ -21,8 +21,9 @@
 # 47984+100*(N-1) .. 48010+100*(N-1) (screen 2: 48084-48110). These are not
 # Sunshine's default ports, so a normal Sunshine install keeps working beside it.
 # One generated login (~/.config/virtual-screens/login, 0600) is set on every
-# instance with `sunshine --creds`; pairing goes through each instance's local
-# API (https://127.0.0.1:<port+1>, reachable from this laptop only).
+# instance by writing its state file directly, so the password never shows up
+# in any process's arguments; pairing goes through each instance's local API
+# (https://127.0.0.1:<port+1>, reachable from this laptop only).
 #
 # The system part (firewall, USB naming, Wi-Fi rules) is installed once by
 # virtual-screen-root, see README.md.
@@ -98,6 +99,40 @@ ensure_login() {
   read -r USER_NAME USER_PASS < "$LOGIN_FILE"
 }
 
+# Sunshine's own way to set the Web UI login, `sunshine --creds`, takes the
+# password as command line arguments, where any other local account can read
+# it (/proc/<pid>/cmdline). Instead the login is written straight into the
+# instance's state file, in Sunshine's own format: a random salt, and the
+# password stored as SHA-256(password + salt), hex-encoded upper case with the
+# digest's bytes in reverse order (save_user_creds in src/httpcommon.cpp, Hex
+# in src/utility.h; unchanged from Sunshine 0.20 through at least 0.23).
+sunshine_hash() {  # sunshine_hash PASSWORD SALT
+  local hex rev="" i
+  hex=$(printf '%s%s' "$1" "$2" | sha256sum | cut -d' ' -f1)
+  for ((i = 62; i >= 0; i -= 2)); do rev+="${hex:i:2}"; done
+  printf '%s' "${rev^^}"
+}
+
+# Write our login into this instance's state file. The password itself only
+# ever travels through shell variables and stdin, never a process's arguments.
+set_login_state() {  # write our login into this instance's Sunshine state file
+  local st="$CONF_DIR/sunshine_state.json" salt hash
+  salt=$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16)
+  hash=$(sunshine_hash "$USER_PASS" "$salt")
+  # Don't clobber a state file Sunshine itself couldn't read either.
+  [[ ! -s $st ]] || jq . "$st" >/dev/null 2>&1 || return 1
+  ( umask 077
+    if [[ -s $st ]]; then
+      jq --arg u "$USER_NAME" --arg s "$salt" --arg p "$hash" \
+        '.username = $u | .salt = $s | .password = $p' "$st" > "$st.new"
+    else
+      jq -nc --arg u "$USER_NAME" --arg s "$salt" --arg p "$hash" \
+        '{username: $u, salt: $s, password: $p}' > "$st.new"
+    fi
+    mv "$st.new" "$st"
+  ) || { rm -f "$st.new"; return 1; }
+}
+
 # The login goes to curl on stdin (-K -), so it never shows up in `ps`.
 curl_api() { printf 'user = "%s:%s"\n' "$USER_NAME" "$USER_PASS" | curl -K - -sk "$@"; }
 
@@ -156,11 +191,12 @@ EOF
   } > "$CONF.new"
   mv "$CONF.new" "$CONF"
   [[ -f $CONF_DIR/apps.json ]] || echo '{"env":{},"apps":[{"name":"Desktop","image-path":"desktop.png"}]}' > "$CONF_DIR/apps.json"
-  # Set the login on this instance whenever the saved one is new to it.
-  # (Sunshine only takes it as arguments; this runs for a moment, once per new login.)
+  # Set the login on this instance whenever the saved one is new to it (once
+  # per new login), by writing its state file — never through
+  # `sunshine --creds`, whose arguments any local account could read.
   local mark; mark=$(sha256sum "$LOGIN_FILE" | cut -c1-16)
   if [[ $(cat "$CONF_DIR/.login-set" 2>/dev/null) != "$mark" ]]; then
-    sunshine "$CONF" --creds "$USER_NAME" "$USER_PASS" >/dev/null 2>&1 && echo "$mark" > "$CONF_DIR/.login-set"
+    set_login_state && echo "$mark" > "$CONF_DIR/.login-set"
   fi
 }
 

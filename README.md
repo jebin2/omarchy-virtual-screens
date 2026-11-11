@@ -73,6 +73,7 @@ A random login for Sunshine's API is generated once and kept in `~/.config/virtu
 
 - Sunshine is reachable only over USB tethering links and Wi-Fi networks you allowed, and only from that network's own address range. Its admin page and API answer on this laptop only.
 - New devices need a PIN that you type in on the laptop.
+- The generated Sunshine login is kept only in files readable by you and is written straight into each instance's state file, so it never appears in a process's command line, where other accounts on this laptop could read it.
 - The panel never runs a root command without the password prompt. After setup, the root helper runs from a root-owned copy, not from your plugin folder.
 - With `ufw` inactive, Omarchy's firewall isn't in the way and these rules aren't added.
 
