@@ -241,6 +241,14 @@ stop_sunshine() {
   local pid i
   running || return 0
   pid=$(<"$RUN/pid")
+  # Sunshine segfaults on exit while a pairing request is still pending (one
+  # Moonlight started and gave up on). Cancel those first.
+  local id
+  ensure_login
+  for id in $(curl_api --max-time 3 "$API/api/pin" 2>/dev/null | jq -r '.pairings[]?.id' 2>/dev/null); do
+    curl_api --body "$(jq -nc --arg id "$id" '{pairing_id:$id}')" --max-time 3 -X DELETE \
+      -H 'Content-Type: application/json' "$API/api/pin" >/dev/null 2>&1
+  done
   kill "$pid" 2>/dev/null
   for i in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.1; done
   kill -9 "$pid" 2>/dev/null
