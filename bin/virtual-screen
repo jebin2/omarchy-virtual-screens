@@ -129,12 +129,13 @@ set_login_state() {  # write our login into this instance's Sunshine state file
   # Don't clobber a state file Sunshine itself couldn't read either.
   [[ ! -s $st ]] || jq . "$st" >/dev/null 2>&1 || return 1
   ( umask 077
+    # Through the environment, not --arg: jq's arguments are public,
+    # /proc/<pid>/environ is readable only by this account.
+    export VS_U="$USER_NAME" VS_S="$salt" VS_P="$hash"
     if [[ -s $st ]]; then
-      jq --arg u "$USER_NAME" --arg s "$salt" --arg p "$hash" \
-        '.username = $u | .salt = $s | .password = $p' "$st" > "$st.new"
+      jq '.username = env.VS_U | .salt = env.VS_S | .password = env.VS_P' "$st" > "$st.new"
     else
-      jq -nc --arg u "$USER_NAME" --arg s "$salt" --arg p "$hash" \
-        '{username: $u, salt: $s, password: $p}' > "$st.new"
+      jq -nc '{username: env.VS_U, salt: env.VS_S, password: env.VS_P}' > "$st.new"
     fi
     mv "$st.new" "$st"
   ) || { rm -f "$st.new"; return 1; }
@@ -361,30 +362,33 @@ pair() {
   ensure_login
   local before list="" reqs="" own count id addr resp i
   before=$(client_uuids)
-  for i in $(seq 1 5); do  # the request may still be on its way
+  # Requests from this machine come from a local account, never a device:
+  # cancel them. Wait (up to 5 s) for one from another machine, since the
+  # device's request may still be on its way.
+  own=$(own_addresses)
+  for i in $(seq 1 5); do
     list=$(api GET /api/pin)
-    [[ $(jq -r '.pairings | length' <<<"$list" 2>/dev/null) =~ ^[1-9] ]] && break
+    jq -e '.pairings | type == "array"' <<<"$list" >/dev/null 2>&1 ||
+      { echo "Couldn't read Sunshine's pairing requests. Is Sunshine up to date?"; return 1; }
+    reqs=""
+    while read -r id addr; do
+      [[ -n $id ]] || continue
+      addr=${addr#::ffff:}
+      if [[ -z $addr ]] || grep -qxF -- "$addr" <<<"$own"; then
+        api DELETE /api/pin "$(jq -nc --arg id "$id" '{pairing_id:$id}')" >/dev/null
+      else
+        reqs+="$id"$'\n'
+      fi
+    done < <(jq -r '.pairings[] | "\(.id) \(.address // "")"' <<<"$list")
+    [[ -n $reqs ]] && break
     sleep 1
   done
-  jq -e '.pairings | type == "array"' <<<"$list" >/dev/null 2>&1 ||
-    { echo "Couldn't read Sunshine's pairing requests. Is Sunshine up to date?"; return 1; }
-  # Requests from this machine come from a local account, never a device:
-  # cancel them. The PIN goes only to a single remaining request.
-  own=$(own_addresses)
-  while read -r id addr; do
-    [[ -n $id ]] || continue
-    addr=${addr#::ffff:}
-    if [[ -z $addr ]] || grep -qxF -- "$addr" <<<"$own"; then
-      api DELETE /api/pin "$(jq -nc --arg id "$id" '{pairing_id:$id}')" >/dev/null
-    else
-      reqs+="$id"$'\n'
-    fi
-  done < <(jq -r '.pairings[] | "\(.id) \(.address // "")"' <<<"$list")
   count=$(grep -c . <<<"$reqs")
   (( count == 0 )) && { echo "No device is waiting for a PIN. In Moonlight tap this PC, then type the PIN it shows."; return 1; }
   (( count > 1 )) && { echo "More than one device is asking to pair. Turn the screen off and on, then pair one device at a time."; return 1; }
   id=${reqs%$'\n'}
-  resp=$(api POST /api/pin "$(jq -nc --arg id "$id" --arg pin "$pin" --arg name "$name" '{pairing_id:$id, pin:$pin, name:$name}')")
+  # The PIN reaches jq through the environment, not --arg (arguments are public).
+  resp=$(api POST /api/pin "$(VS_PIN=$pin jq -nc --arg id "$id" --arg name "$name" '{pairing_id:$id, pin:env.VS_PIN, name:$name}')")
   status_ok "$resp" || { echo "Sunshine didn't take that PIN. Check the 4 digits in Moonlight and try again."; return 1; }
   for i in $(seq 1 15); do
     [[ -n $(comm -13 <(echo "$before") <(client_uuids)) ]] && { echo "Paired: $name"; return 0; }
