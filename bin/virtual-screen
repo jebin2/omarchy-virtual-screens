@@ -418,7 +418,8 @@ set_audio() {
     device) val=enabled ;;
     *) echo "usage: virtual-screen $N audio laptop|device"; return 2 ;;
   esac
-  [[ -f $CONF ]] || { ensure_login; write_config; }
+  ensure_login  # wait_login below checks Sunshine with our login
+  [[ -f $CONF ]] || write_config
   sed -i "s/^stream_audio = .*/stream_audio = $val/" "$CONF"
   # Sunshine reads its config at start: restart it if it is streaming now.
   if running; then
