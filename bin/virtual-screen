@@ -514,7 +514,7 @@ info() {
 
 # Everything the panel shows, in one call.
 info_all() {
-  local screens wifi_uuid="" wifi_name="" trusted=false sunshine=false system=false update=false ver=""
+  local screens wifi_uuid="" wifi_name="" trusted=false sunshine=false system=false update=false ver="" firewall=false
   ADDRS=$(addresses | jq -Rnc '[inputs | split(" ") | {kind: .[0], addr: .[1]}]')
   screens=$(for s in "${SCREENS[@]}"; do setup "$s"; info; done | jq -sc .)
   command -v sunshine >/dev/null && sunshine=true
@@ -523,6 +523,11 @@ info_all() {
     ver=$(<"$SYS_DIR/version")
     [[ $ver == "$SYSTEM_VERSION" ]] || update=true
   fi
+  # Without an active ufw nothing limits Sunshine's ports to USB and trusted
+  # Wi-Fi: the panel must say so instead of "Only USB". (ufw.conf is readable
+  # without root; `ufw status` isn't.)
+  command -v ufw >/dev/null && grep -qx 'ENABLED=yes' /etc/ufw/ufw.conf 2>/dev/null &&
+    systemctl is-active -q ufw 2>/dev/null && firewall=true
   # -g escapes ":" inside fields, so ask for the name separately, unescaped.
   wifi_uuid=$(nmcli -g UUID,TYPE con show --active 2>/dev/null | awk -F: '$NF == "802-11-wireless" {print $1; exit}')
   if [[ -n $wifi_uuid ]]; then
@@ -530,11 +535,11 @@ info_all() {
     grep -qx "$wifi_uuid" "$SYS_DIR/trusted-wifi" 2>/dev/null && trusted=true
   fi
   jq -nc --argjson screens "$screens" --argjson sunshine "$sunshine" --argjson system "$system" \
-     --argjson update "$update" \
+     --argjson update "$update" --argjson firewall "$firewall" \
      --arg wname "$wifi_name" --arg wuuid "$wifi_uuid" --argjson trusted "$trusted" \
      --argjson open "$([[ -e $WIFI_FLAG ]] && echo true || echo false)" \
      '{loaded: true, screens: $screens, ready: ($sunshine and $system), sunshine: $sunshine, system: $system,
-       update: $update,
+       update: $update, firewall: $firewall,
        wifi: (if $wuuid == "" then null else {name: $wname, uuid: $wuuid, trusted: $trusted, open: $open} end)}'
 }
 

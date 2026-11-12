@@ -492,7 +492,8 @@ Panel {
                 VsText {
                   width: parent.width
                   color: Qt.darker(root.bar.foreground, 1.4)
-                  text: root.info.wifi && root.info.wifi.trusted ? strings.t("wifi.allowed") : strings.t("wifi.blocked")
+                  text: root.info.firewall === false ? strings.t("wifi.noFirewall")
+                    : root.info.wifi && root.info.wifi.trusted ? strings.t("wifi.allowed") : strings.t("wifi.blocked")
                 }
               }
 

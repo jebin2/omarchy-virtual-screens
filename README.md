@@ -71,14 +71,15 @@ A random login for Sunshine's API is generated once and kept in `~/.config/virtu
 
 ## Security
 
-- Sunshine is reachable only over USB tethering links and Wi-Fi networks you allowed, and only from that network's own address range. Its admin page and API answer on this laptop only.
+- With Omarchy's firewall (`ufw`) on, Sunshine is reachable only over USB tethering links and Wi-Fi networks you allowed, and only from that network's own address range. Its admin page and API answer on this laptop only.
 - New devices need a PIN that you type in on the laptop.
 - The generated Sunshine login is kept only in files readable by you and is written straight into each instance's state file, so it never appears in a process's command line, where other accounts on this laptop could read it.
 - The login is only ever sent to the instance's own Sunshine: requests to its local API are pinned to the public key of that instance's certificate (kept in your config dir), so another account that takes the API port first gets no connection and never sees the login.
 - `~/.config/virtual-screens` (configs, Sunshine's keys and state, logs) is kept private to your account (mode 700), and runtime files live only in your session's private runtime dir, never in shared `/tmp`.
 - Uninstall removes your config folder as you, not as root.
 - The panel never runs a root command without the password prompt. After setup, the root helper runs from a root-owned copy, not from your plugin folder.
-- With `ufw` inactive, Omarchy's firewall isn't in the way and these rules aren't added.
+- With `ufw` off, nothing limits Sunshine to those networks: any network you're on can reach it (new devices still need the PIN). The panel says so in place of "Only USB on this Wi-Fi".
+- A pairing PIN is never put in a process's command line, and it goes to exactly one waiting request from another machine. Requests from this laptop itself (another account) are cancelled; with more than one device waiting, nothing is sent.
 
 ## Requirements
 

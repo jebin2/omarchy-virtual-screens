@@ -13,6 +13,7 @@
   "setup.running": "Setting up…",
   "wifi.allowed": "Devices on this Wi-Fi can connect",
   "wifi.blocked": "Only USB on this Wi-Fi",
+  "wifi.noFirewall": "Firewall (ufw) is off: any network can reach the screens",
   "wifi.allow": "Allow",
   "wifi.disallow": "Stop allowing",
   "screen.second": "Second screen",
