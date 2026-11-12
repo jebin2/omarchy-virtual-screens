@@ -33,6 +33,7 @@ Panel {
   property int vsExpanded: -1                       // n of the row opened with the arrow
   property int vsPairFormFor: -1                    // n with "Pair a different device" open
   property int vsPairingFor: -1                     // n while a pair command runs
+  property string vsPairPin: ""                     // sent on stdin, never in arguments
   property var vsHidden: ({})                       // n -> true: details closed with the arrow
   property int vsForgetFor: -1                      // n while a forget command runs
   property int vsMsgFor: -1
@@ -130,7 +131,10 @@ Panel {
     root.vsMsgFor = n
     root.vsMsg = strings.t("details.pairing")
     root.vsMsgOk = true
-    pairProc.command = ["bash", root.vsCmd, String(n), "pair", pin, name]
+    // The PIN goes to the helper on stdin: arguments are visible to every
+    // local account in /proc/<pid>/cmdline.
+    root.vsPairPin = pin
+    pairProc.command = ["bash", root.vsCmd, String(n), "pair", name]
     pairProc.running = true
   }
   function vsForget(n, uuid) {
@@ -235,8 +239,14 @@ Panel {
 
   Process {
     id: pairProc
+    stdinEnabled: true
     stdout: StdioCollector { id: pairOut; waitForEnd: true }
+    onStarted: {
+      write(root.vsPairPin + "\n")
+      root.vsPairPin = ""
+    }
     onExited: function(exitCode) {
+      root.vsPairPin = ""
       var out = String(pairOut.text || "").trim().split("\n")
       root.vsMsg = out[out.length - 1] || ""
       root.vsMsgOk = exitCode === 0
