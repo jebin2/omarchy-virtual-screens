@@ -491,7 +491,10 @@ Panel {
                 }
                 VsText {
                   width: parent.width
-                  color: Qt.darker(root.bar.foreground, 1.4)
+                  // The firewall warning is long and matters: wrap it, in the warning color.
+                  wrapMode: Text.WordWrap
+                  elide: Text.ElideNone
+                  color: root.info.firewall === false ? Commons.Color.accent : Qt.darker(root.bar.foreground, 1.4)
                   text: root.info.firewall === false ? strings.t("wifi.noFirewall")
                     : root.info.wifi && root.info.wifi.trusted ? strings.t("wifi.allowed") : strings.t("wifi.blocked")
                 }
